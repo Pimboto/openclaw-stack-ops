@@ -1,0 +1,26 @@
+{
+  "name": "openclaw-stack-ops",
+  "version": "0.1.0",
+  "description": "Live mission-control UI for multi-agent OpenClaw setups: watch your orchestrator fan out work to specialist agents and their architecture critics, in real time.",
+  "main": "server.js",
+  "bin": {
+    "openclaw-stack-ops": "./server.js"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "openclaw",
+    "multi-agent",
+    "agents",
+    "dashboard",
+    "orchestration",
+    "sse",
+    "observability"
+  ],
+  "author": "Pimbo",
+  "license": "MIT"
+}

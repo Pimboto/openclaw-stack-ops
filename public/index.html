@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenClaw · Stack Ops</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- barra de comando -->
+  <header class="bar">
+    <div class="brand">
+      <div class="claw">🦞</div>
+      <div>
+        <h1>OPEN<em>CLAW</em> STACK OPS</h1>
+        <div class="sub">ORQUESTADOR · ESPECIALISTAS · CRÍTICOS</div>
+      </div>
+    </div>
+    <div class="mode" id="mode">
+      <button id="modeLive" title="Datos reales del gateway vía SSE">LIVE</button>
+      <button id="modeDemo" title="Simulador guionado (sin gateway)">DEMO</button>
+    </div>
+    <div class="cmd">
+      <input id="task" type="text" placeholder="Escribe una tarea para el orquestador…" autocomplete="off">
+      <button class="btn primary" id="run">▶ Ejecutar</button>
+      <button class="btn" id="pause" disabled>⏸ Pausar</button>
+      <button class="btn" id="reset" disabled>⟲ Reiniciar</button>
+      <select id="speed" title="Velocidad (solo demo)">
+        <option value="0.5">0.5×</option>
+        <option value="1" selected>1×</option>
+        <option value="2">2×</option>
+        <option value="4">4×</option>
+      </select>
+    </div>
+    <div class="pill" id="pill" data-st="idle"><span class="dot"></span><span id="pillTxt">EN ESPERA</span></div>
+  </header>
+
+  <!-- escenarios (solo demo) -->
+  <div class="chips" id="chips">
+    <span class="lbl">ESCENARIOS</span>
+  </div>
+
+  <!-- stats -->
+  <div class="stats">
+    <div class="stat"><span class="k" id="k0">TOKENS QUEMADOS</span><span class="v" id="stTk">0</span></div>
+    <div class="stat"><span class="k" id="k1">MENSAJES ENTRE AGENTES</span><span class="v" id="stMsg">0</span></div>
+    <div class="stat"><span class="k" id="k2">AGENTES ACTIVOS</span><span class="v" id="stAg">0<small>/13</small></span></div>
+    <div class="stat"><span class="k" id="k3">TIEMPO</span><span class="v" id="stTime">00:00</span></div>
+    <div class="stat prog">
+      <span class="k">PROGRESO</span>
+      <div class="progbar"><i id="progFill"></i></div>
+    </div>
+  </div>
+
+  <!-- grid principal -->
+  <main class="grid">
+    <aside class="panelbox">
+      <div class="head"><span>CAPAS / AGENTES</span><span id="rosterCount">13</span></div>
+      <div class="roster" id="roster"></div>
+    </aside>
+
+    <section class="stage" id="stage">
+      <svg id="net" xmlns="http://www.w3.org/2000/svg"></svg>
+      <canvas id="fx"></canvas>
+      <div class="legend" id="legend"></div>
+      <div class="hint" id="hint">Conectando al gateway…</div>
+    </section>
+
+    <aside class="panelbox side">
+      <div class="tabs">
+        <button id="tabFeed" class="on">FEED EN VIVO</button>
+        <button id="tabAgent">AGENTE</button>
+      </div>
+      <div class="feed" id="feed"></div>
+      <div class="agentP" id="agentP"></div>
+    </aside>
+  </main>
+
+  <!-- timeline -->
+  <footer class="timeline">
+    <div class="tl-head">
+      <span id="tlTitle">TIMELINE</span>
+      <span class="leg" id="tlLeg">barra tenue = crítico · barra llena = especialista · línea coral = ahora</span>
+    </div>
+    <div class="tl-wrap" id="tlWrap"></div>
+    <div class="playhead" id="playhead"></div>
+  </footer>
+
+  <div class="foot">
+    <span id="footStatus">openclaw-stack-ops</span>
+    <span><a href="https://github.com/" id="footLink">MIT · hecho para fleets multi-agente de OpenClaw</a></span>
+  </div>
+
+</div>
+<script src="agents.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
