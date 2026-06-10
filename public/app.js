@@ -1086,6 +1086,62 @@ function setMode(mode) {
 $('modeLive').addEventListener('click', () => setMode('live'));
 $('modeDemo').addEventListener('click', () => setMode('demo'));
 
+/* ============================================================
+   FLEET CONTROL — modelo + effort de toda la flota
+   ============================================================ */
+const fleetEl = $('fleet'), fleetModel = $('fleetModel'), fleetThinking = $('fleetThinking'), fleetApply = $('fleetApply');
+let fleetCurrent = { model: null, thinking: null };
+function fleetMarkDirty() {
+  const dirty = fleetModel.value !== fleetCurrent.model || fleetThinking.value !== fleetCurrent.thinking;
+  fleetEl.classList.toggle('dirty', dirty);
+  fleetApply.textContent = dirty ? 'Aplicar ●' : 'Aplicar';
+}
+async function fleetLoad() {
+  try {
+    const r = await fetch('/api/fleet');
+    const f = await r.json();
+    if (!f.ok) return;
+    fleetCurrent = { model: f.model, thinking: f.thinking };
+    if (f.model && ![...fleetModel.options].some(o => o.value === f.model)) {
+      const o = document.createElement('option'); o.value = f.model; o.textContent = f.model.split('/').pop();
+      fleetModel.appendChild(o);
+    }
+    if (f.model) fleetModel.value = f.model;
+    if (f.thinking) fleetThinking.value = f.thinking;
+    fleetMarkDirty();
+  } catch { /* demo mode / no bridge */ }
+}
+fleetModel.addEventListener('change', fleetMarkDirty);
+fleetThinking.addEventListener('change', fleetMarkDirty);
+fleetApply.addEventListener('click', async () => {
+  const model = fleetModel.value, thinking = fleetThinking.value;
+  if (model === fleetCurrent.model && thinking === fleetCurrent.thinking) return;
+  let warn = 'Cambiar TODA la flota (28 agentes) a:\n\n  modelo: ' + model.split('/').pop() + '\n  effort: ' + thinking + '\n\nEsto REINICIA el gateway.';
+  try {
+    const st = await (await fetch('/api/fleet')).json();
+    if (st.running > 0) warn += '\n\n⚠ HAY ' + st.running + ' TAREA(S) CORRIENDO — el reinicio las puede matar.';
+  } catch { /* noop */ }
+  if (model.includes('fable')) warn += '\n\n⚠ Fable 5: experimental en OpenClaw 2026.6.1 — verifica el primer run.';
+  if (!confirm(warn)) return;
+  fleetApply.disabled = true; fleetApply.textContent = '… aplicando';
+  try {
+    const r = await fetch('/api/fleet', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, thinking }),
+    });
+    const out = await r.json();
+    if (!out.ok) throw new Error(out.error || '?');
+    fleetCurrent = { model, thinking };
+    feedLine('sys', '<span class="tag">[FLOTA]</span> ✅ ' + model.split('/').pop() + ' · effort ' + thinking + ' · gateway reiniciado');
+  } catch (e) {
+    feedLine('fail', '<span class="tag">[FLOTA]</span> ' + e.message);
+  } finally {
+    fleetApply.disabled = false;
+    fleetMarkDirty();
+  }
+});
+fleetLoad();
+
 /* ---------- chips / controls ---------- */
 function markChip() {
   document.querySelectorAll('.chip').forEach(c => {

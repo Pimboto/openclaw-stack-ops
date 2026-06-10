@@ -25,6 +25,24 @@
       <button id="modeLive" title="Datos reales del gateway vía SSE">LIVE</button>
       <button id="modeDemo" title="Simulador guionado (sin gateway)">DEMO</button>
     </div>
+    <div class="fleet" id="fleet" title="Modelo + effort de TODA la flota (28 agentes)">
+      <span class="flbl">FLOTA</span>
+      <select id="fleetModel">
+        <option value="anthropic/claude-opus-4-8">Opus 4.8</option>
+        <option value="anthropic/claude-sonnet-4-6">Sonnet 4.6</option>
+        <option value="anthropic/claude-opus-4-7">Opus 4.7</option>
+        <option value="anthropic/claude-fable-5">Fable 5 ⚠</option>
+      </select>
+      <select id="fleetThinking">
+        <option value="off">effort: off</option>
+        <option value="low">effort: low</option>
+        <option value="medium">effort: medium</option>
+        <option value="high">effort: high</option>
+        <option value="max">effort: MAX</option>
+        <option value="adaptive">effort: adaptive</option>
+      </select>
+      <button class="btn" id="fleetApply">Aplicar</button>
+    </div>
     <div class="cmd">
       <input id="task" type="text" placeholder="Escribe una tarea para el orquestador…" autocomplete="off">
       <button class="btn primary" id="run">▶ Ejecutar</button>

@@ -67,6 +67,17 @@ input,select{font-family:inherit}
 .mode button.on{color:#0a0d12;background:var(--coral)}
 .mode button#modeLive.on{background:var(--green)}
 
+/* fleet control */
+.fleet{display:flex;align-items:center;gap:6px}
+.fleet .flbl{font-size:9px;letter-spacing:.2em;color:var(--dim)}
+.fleet select{
+  background:var(--panel-2);border:1px solid var(--line);border-radius:8px;
+  color:var(--txt);padding:8px 6px;font-size:11px;outline:none;
+}
+.fleet select:focus{border-color:rgba(255,92,69,.55)}
+.fleet .btn{padding:8px 11px;font-size:11px}
+.fleet.dirty .btn{border-color:rgba(255,193,69,.55);color:#ffe2a8}
+
 .cmd{flex:1;display:flex;align-items:center;gap:8px;min-width:280px}
 .cmd input{
   flex:1;background:var(--panel-2);border:1px solid var(--line);border-radius:8px;

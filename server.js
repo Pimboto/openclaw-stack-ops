@@ -335,6 +335,61 @@ const server = http.createServer((req, res) => {
     });
   }
 
+  if (url === '/api/fleet') {
+    // Fleet control: read or switch the whole fleet's model + thinking effort.
+    const cfgPath = path.join(process.env.USERPROFILE || process.env.HOME || '', '.openclaw', 'openclaw.json');
+    if (req.method === 'GET') {
+      try {
+        const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+        const d = cfg.agents?.defaults || {};
+        return json(res, 200, {
+          ok: true,
+          model: d.model?.primary || null,
+          thinking: d.thinkingDefault || 'off',
+          subagentThinking: d.subagents?.thinking || null,
+          running: [...state.tasks.values()].filter(t => t.status === 'running' || t.status === 'queued').length,
+        });
+      } catch (err) { return json(res, 500, { ok: false, error: String(err.message || err) }); }
+    }
+    if (req.method === 'POST') {
+      let body = '';
+      req.on('data', c => { body += c; if (body.length > 16 * 1024) req.destroy(); });
+      req.on('end', async () => {
+        try {
+          const { model, thinking } = JSON.parse(body || '{}');
+          const VALID_THINKING = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'adaptive', 'max'];
+          if (model && !/^[a-z0-9/._-]+$/i.test(model)) throw new Error('modelo inválido');
+          if (thinking && !VALID_THINKING.includes(thinking)) throw new Error('thinking inválido');
+          const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+          cfg.agents = cfg.agents || {}; cfg.agents.defaults = cfg.agents.defaults || {};
+          const d = cfg.agents.defaults;
+          if (model) {
+            d.models = d.models || {};
+            if (model.startsWith('anthropic/') && !d.models[model]) {
+              d.models[model] = { agentRuntime: { id: 'claude-cli' } }; // route through the local Claude CLI
+            }
+            d.model = d.model || {};
+            d.model.primary = model;
+          }
+          if (thinking) {
+            d.thinkingDefault = thinking;
+            d.subagents = d.subagents || {};
+            d.subagents.thinking = thinking; // specialists + critics spawns too
+          }
+          fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), 'utf8');
+          const validate = await runCli('config validate');
+          if (!/Config valid/i.test(validate)) throw new Error('config no validó: ' + excerpt(validate, 200));
+          const restart = await runCli('gateway restart', 90000);
+          pushEvent({ type: 'sys', text: `FLOTA actualizada → modelo: ${model || 'sin cambio'} · effort: ${thinking || 'sin cambio'} · gateway reiniciado` });
+          json(res, 200, { ok: true, model: model || null, thinking: thinking || null, restarted: /Restart/i.test(restart) });
+        } catch (err) {
+          json(res, 400, { ok: false, error: String(err.message || err) });
+        }
+      });
+      return;
+    }
+  }
+
   if (url === '/api/upload' && req.method === 'POST') {
     // Save a pasted/dropped image so file-reading agent runtimes can see it.
     let body = '';
