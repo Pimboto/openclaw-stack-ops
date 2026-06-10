@@ -347,6 +347,12 @@ input,select{font-family:inherit}
   display:grid;place-items:center;
 }
 .comp-foot{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.comp-thread{
+  font-family:var(--font-m);font-size:9.5px;letter-spacing:.06em;color:var(--dim);
+  padding:5px 10px;border:1px solid var(--line-soft);border-radius:99px;white-space:nowrap;
+}
+.comp-thread:empty{display:none}
+.comp-thread.live{color:#bdf2cf;border-color:rgba(74,222,128,.35)}
 .comp-foot input{
   flex:1;min-width:240px;background:var(--panel-2);border:1px solid var(--line);border-radius:8px;
   color:var(--txt);padding:9px 12px;font-size:12px;outline:none;font-family:var(--font-m);

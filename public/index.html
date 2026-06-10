@@ -90,7 +90,10 @@
     <textarea id="compText" rows="5" placeholder="Escribe o pega aquí tu tarea completa: specs, código, contexto… También puedes pegar IMÁGENES (Ctrl+V) o arrastrarlas."></textarea>
     <div class="comp-imgs" id="compImgs"></div>
     <div class="comp-foot">
-      <input id="compDir" type="text" placeholder="Carpeta del proyecto (absoluta), ej: C:\Work\prueba-openclaw">
+      <input id="compDir" type="text" list="compDirRecents" placeholder="Carpeta del proyecto (absoluta), ej: C:\Work\onlyreels">
+      <datalist id="compDirRecents"></datalist>
+      <span class="comp-thread" id="compThread" title="Cada proyecto tiene su propio hilo persistente con el architect"></span>
+      <button class="btn" id="compNew" title="Resetear la conversación de ESTE proyecto (manda /new a su hilo)">↺ Nueva conv.</button>
       <button class="btn primary" id="compSend">▶ Despachar al ARCHITECT</button>
     </div>
   </footer>

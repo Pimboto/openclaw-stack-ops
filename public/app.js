@@ -652,8 +652,49 @@ if (compEl) {
       if (evName === 'drop') [...(e.dataTransfer?.files || [])].forEach(compAddImageFile);
     });
   });
+  /* ---- proyectos recientes: cada carpeta = un hilo persistente del architect ---- */
+  const compThread = $('compThread'), compNew = $('compNew'), compRecents = $('compDirRecents');
+  const projSlug = d => 'p-' + d.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(-40);
+  function loadRecents() { try { return JSON.parse(localStorage.getItem('stackops-projects') || '[]'); } catch { return []; } }
+  function saveRecent(dir) {
+    if (!dir) return;
+    const r = loadRecents().filter(p => p.dir !== dir);
+    r.unshift({ dir, last: Date.now() });
+    localStorage.setItem('stackops-projects', JSON.stringify(r.slice(0, 12)));
+    renderRecents();
+  }
+  function renderRecents() {
+    compRecents.innerHTML = '';
+    loadRecents().forEach(p => {
+      const o = document.createElement('option');
+      o.value = p.dir;
+      compRecents.appendChild(o);
+    });
+  }
+  function refreshThreadChip() {
+    const dir = compDir.value.trim();
+    if (!dir) { compThread.textContent = ''; compThread.classList.remove('live'); return; }
+    const known = loadRecents().some(p => p.dir === dir);
+    compThread.textContent = known ? 'HILO: ' + projSlug(dir) + ' · continúa donde quedó' : 'HILO NUEVO: ' + projSlug(dir);
+    compThread.classList.toggle('live', known);
+  }
   compDir.value = localStorage.getItem('stackops-projectdir') || '';
-  compDir.addEventListener('change', () => localStorage.setItem('stackops-projectdir', compDir.value.trim()));
+  compDir.addEventListener('change', () => { localStorage.setItem('stackops-projectdir', compDir.value.trim()); refreshThreadChip(); });
+  compDir.addEventListener('input', refreshThreadChip);
+  renderRecents();
+  refreshThreadChip();
+
+  compNew.addEventListener('click', async () => {
+    const dir = compDir.value.trim();
+    if (!dir) { feedLine('sys', '<span class="tag">[COMPOSER]</span> pon la carpeta del proyecto para resetear SU conversación'); return; }
+    if (!confirm('¿Resetear la conversación del architect para este proyecto?\n' + dir + '\n\n(El hook session-memory guarda un resumen antes de limpiar.)')) return;
+    try {
+      await sendToArchitect('/new', projSlug(dir));
+      feedLine('sys', '<span class="tag">[COMPOSER]</span> conversación de ' + projSlug(dir) + ' reseteada');
+    } catch (e) {
+      feedLine('fail', '<span class="tag">[COMPOSER]</span> ' + e.message);
+    }
+  });
 
   async function compDispatch() {
     if (ST.mode !== 'live') { feedLine('sys', '<span class="tag">[COMPOSER]</span> cambia a modo LIVE para despachar de verdad'); return; }
@@ -680,11 +721,11 @@ if (compEl) {
       if (savedPaths.length) {
         message += '\n\nIMÁGENES ADJUNTAS (léelas desde disco antes de empezar):\n' + savedPaths.map(p => '- ' + p).join('\n');
       }
-      // Per-project session: each project folder gets its own clean architect thread.
-      const sessionKey = dir
-        ? 'p-' + dir.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(-40)
-        : undefined;
+      // Per-project session: each project folder gets its own persistent architect thread.
+      const sessionKey = dir ? projSlug(dir) : undefined;
       await sendToArchitect(message, sessionKey);
+      if (dir) saveRecent(dir);
+      refreshThreadChip();
       compText.value = '';
       pendingImgs.length = 0;
       compRenderImgs();
