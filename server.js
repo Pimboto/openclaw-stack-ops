@@ -212,17 +212,24 @@ function dispatchRun(message, agent) {
     const target = (agent || 'architect').replace(/[^a-zA-Z0-9_-]/g, '');
     const clean = String(message || '').trim();
     if (!clean) return reject(new Error('mensaje vacío'));
+    const logPath = path.join(__dirname, 'dispatch.log');
+    const logFd = fs.openSync(logPath, 'a');
+    fs.writeSync(logFd, `\n[${new Date().toISOString()}] dispatch → ${target}: ${clean.slice(0, 120)}\n`);
     let child;
     if (IS_WIN) {
-      // cmd.exe quoting: strip double quotes from the message (documented limitation).
-      const safe = clean.replace(/"/g, "'");
-      child = spawn('cmd.exe', ['/d', '/s', '/c', `${BIN} agent --agent ${target} -m "${safe}"`],
-        { detached: true, stdio: 'ignore', windowsHide: true });
+      // Pass args separately so Node quotes each one for cmd.exe (compound strings break).
+      const safe = clean.replace(/"/g, "'"); // cmd quoting limitation, documented in README
+      child = spawn('cmd.exe', ['/c', BIN, 'agent', '--agent', target, '-m', safe],
+        { detached: true, stdio: ['ignore', logFd, logFd], windowsHide: true });
     } else {
       child = spawn(BIN, ['agent', '--agent', target, '-m', clean],
-        { detached: true, stdio: 'ignore' });
+        { detached: true, stdio: ['ignore', logFd, logFd] });
     }
     child.on('error', reject);
+    child.on('exit', (code) => {
+      try { fs.writeSync(logFd, `[${new Date().toISOString()}] run exited code=${code}\n`); fs.closeSync(logFd); } catch { /* noop */ }
+      if (code !== 0) pushEvent({ type: 'sys', text: `el run despachado terminó con código ${code} — revisa dispatch.log` });
+    });
     child.unref();
     pushEvent({ type: 'sys', text: `tarea despachada a "${target}" — los spawns aparecerán en cuanto el orquestador reparta` });
     resolve({ ok: true, agent: target });
