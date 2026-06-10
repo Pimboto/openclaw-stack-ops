@@ -59,7 +59,7 @@ function freshAgents() {
 const gcol = id => (GROUPS[AG[id]?.g] || GROUPS.other).c;
 function fmtTk(n) { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : Math.round(n); }
 function fmtT(s) { const m = Math.floor(s / 60), ss = Math.floor(s % 60); return String(m).padStart(2, '0') + ':' + String(ss).padStart(2, '0'); }
-function fmtClock(ms) { const d = new Date(ms); return d.toTimeString().slice(0, 8); }
+function fmtClock(ms) { return new Date(ms).toLocaleTimeString('en-US', { hour12: true, hour: 'numeric', minute: '2-digit', second: '2-digit' }); }
 function ensureAgent(id) {
   // runtime discovery: unknown agent → add to "other"
   if (AG[id]) return;

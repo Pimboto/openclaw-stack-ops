@@ -207,30 +207,65 @@ async function poll() {
 
 /* --------------------------- dispatch ----------------------------- */
 
+// Resolve the openclaw CLI entry so we can spawn node directly:
+// no cmd.exe (no quoting limits) and no extra console window
+// (windowsHide is broken when combined with detached — nodejs/node#21825).
+let cliEntryCache = null;
+function resolveCliEntry() {
+  if (cliEntryCache !== null) return cliEntryCache;
+  const candidates = [];
+  if (process.env.APPDATA) candidates.push(path.join(process.env.APPDATA, 'npm', 'node_modules', 'openclaw', 'openclaw.mjs'));
+  candidates.push('/usr/local/lib/node_modules/openclaw/openclaw.mjs', '/usr/lib/node_modules/openclaw/openclaw.mjs');
+  cliEntryCache = candidates.find(p => { try { return fs.existsSync(p); } catch { return false; } }) || '';
+  return cliEntryCache;
+}
+
+const ANSI_RE = /\x1b\[[0-9;]*[A-Za-z]/g;
+function extractReply(raw) {
+  // Strip ANSI + banner/decoration lines, keep the agent's actual reply text.
+  const lines = String(raw).replace(ANSI_RE, '').split('\n')
+    .map(l => l.trim())
+    .filter(l => l &&
+      !/OpenClaw \d{4}\./.test(l) &&
+      !/^[◇│└├─|]+$/.test(l) &&
+      !/lobster in your shell/i.test(l));
+  return excerpt(lines.join(' '), 500);
+}
+
 function dispatchRun(message, agent) {
   return new Promise((resolve, reject) => {
     const target = (agent || 'architect').replace(/[^a-zA-Z0-9_-]/g, '');
     const clean = String(message || '').trim();
     if (!clean) return reject(new Error('mensaje vacío'));
     const logPath = path.join(__dirname, 'dispatch.log');
-    const logFd = fs.openSync(logPath, 'a');
-    fs.writeSync(logFd, `\n[${new Date().toISOString()}] dispatch → ${target}: ${clean.slice(0, 120)}\n`);
+    fs.appendFileSync(logPath, `\n[${new Date().toISOString()}] dispatch → ${target}: ${clean.slice(0, 120)}\n`);
+
+    const entry = resolveCliEntry();
+    const args = ['agent', '--agent', target, '-m', clean];
     let child;
-    if (IS_WIN) {
-      // Pass args separately so Node quotes each one for cmd.exe (compound strings break).
-      const safe = clean.replace(/"/g, "'"); // cmd quoting limitation, documented in README
+    if (entry) {
+      // Direct node spawn: hidden window, exact args, full output capture.
+      child = spawn(process.execPath, [entry, ...args], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    } else if (IS_WIN) {
+      const safe = clean.replace(/"/g, "'"); // cmd quoting limitation (fallback path only)
       child = spawn('cmd.exe', ['/c', BIN, 'agent', '--agent', target, '-m', safe],
-        { detached: true, stdio: ['ignore', logFd, logFd], windowsHide: true });
+        { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
     } else {
-      child = spawn(BIN, ['agent', '--agent', target, '-m', clean],
-        { detached: true, stdio: ['ignore', logFd, logFd] });
+      child = spawn(BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
     }
+    let out = '';
+    const cap = d => { out += d.toString(); if (out.length > 400000) out = out.slice(-200000); };
+    child.stdout.on('data', cap);
+    child.stderr.on('data', cap);
     child.on('error', reject);
     child.on('exit', (code) => {
-      try { fs.writeSync(logFd, `[${new Date().toISOString()}] run exited code=${code}\n`); fs.closeSync(logFd); } catch { /* noop */ }
-      if (code !== 0) pushEvent({ type: 'sys', text: `el run despachado terminó con código ${code} — revisa dispatch.log` });
+      try { fs.appendFileSync(logPath, `[${new Date().toISOString()}] run ${target} exited code=${code}\n${out.slice(-4000)}\n`); } catch { /* noop */ }
+      if (code === 0) {
+        pushEvent({ type: 'done', a: target, text: extractReply(out) || 'turno completado' });
+      } else {
+        pushEvent({ type: 'fail', a: target, text: `el run terminó con código ${code} — revisa dispatch.log` });
+      }
     });
-    child.unref();
     pushEvent({ type: 'sys', text: `tarea despachada a "${target}" — los spawns aparecerán en cuanto el orquestador reparta` });
     resolve({ ok: true, agent: target });
   });
