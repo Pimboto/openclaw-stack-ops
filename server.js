@@ -298,6 +298,30 @@ const server = http.createServer((req, res) => {
     });
   }
 
+  if (url === '/api/upload' && req.method === 'POST') {
+    // Save a pasted/dropped image so file-reading agent runtimes can see it.
+    let body = '';
+    req.on('data', c => { body += c; if (body.length > 24 * 1024 * 1024) req.destroy(); });
+    req.on('end', () => {
+      try {
+        const { name, dataBase64, dir } = JSON.parse(body || '{}');
+        const ext = (path.extname(name || '') || '.png').toLowerCase();
+        if (!['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(ext)) throw new Error('solo imágenes png/jpg/gif/webp');
+        const buf = Buffer.from(String(dataBase64 || ''), 'base64');
+        if (!buf.length) throw new Error('imagen vacía');
+        if (buf.length > 16 * 1024 * 1024) throw new Error('imagen > 16MB');
+        const baseDir = (dir && path.isAbsolute(dir)) ? path.join(dir, '_inbox') : path.join(__dirname, 'inbox');
+        fs.mkdirSync(baseDir, { recursive: true });
+        const file = path.join(baseDir, `img-${Date.now()}-${Math.random().toString(36).slice(2, 7)}${ext}`);
+        fs.writeFileSync(file, buf);
+        json(res, 200, { ok: true, path: file });
+      } catch (err) {
+        json(res, 400, { ok: false, error: String(err.message || err) });
+      }
+    });
+    return;
+  }
+
   if (url === '/api/run' && req.method === 'POST') {
     let body = '';
     req.on('data', c => { body += c; if (body.length > 64 * 1024) req.destroy(); });

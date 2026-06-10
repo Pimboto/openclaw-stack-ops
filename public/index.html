@@ -81,14 +81,18 @@
     </aside>
   </main>
 
-  <!-- timeline -->
-  <footer class="timeline">
-    <div class="tl-head">
-      <span id="tlTitle">TIMELINE</span>
-      <span class="leg" id="tlLeg">barra tenue = crítico · barra llena = especialista · línea coral = ahora</span>
+  <!-- composer -->
+  <footer class="composer" id="composer">
+    <div class="comp-head">
+      <span>COMPOSER · TAREA PARA EL ORQUESTADOR</span>
+      <span class="leg">pega texto, código o imágenes · Ctrl+Enter despacha</span>
     </div>
-    <div class="tl-wrap" id="tlWrap"></div>
-    <div class="playhead" id="playhead"></div>
+    <textarea id="compText" rows="5" placeholder="Escribe o pega aquí tu tarea completa: specs, código, contexto… También puedes pegar IMÁGENES (Ctrl+V) o arrastrarlas."></textarea>
+    <div class="comp-imgs" id="compImgs"></div>
+    <div class="comp-foot">
+      <input id="compDir" type="text" placeholder="Carpeta del proyecto (absoluta), ej: C:\Work\prueba-openclaw">
+      <button class="btn primary" id="compSend">▶ Despachar al ARCHITECT</button>
+    </div>
   </footer>
 
   <div class="foot">

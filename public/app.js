@@ -233,6 +233,7 @@ function drawParticles() {
 
 /* ---------- timeline ---------- */
 function buildTimelineRows() {
+  if (!tlWrap) return; // timeline panel replaced by composer
   tlWrap.innerHTML = ''; tlRows = {};
   SPECIALISTS.forEach(a => {
     const r = document.createElement('div');
@@ -440,6 +441,7 @@ function liveRowFor(agentId) {
   return tlRows[agentId] ? agentId : null;
 }
 function rebuildLiveTimeline() {
+  if (!tlWrap) return; // timeline panel replaced by composer
   clearTimelineBars();
   const L = ST.live;
   if (!L.tasks.size) return;
@@ -584,23 +586,116 @@ function connectLive() {
 function disconnectLive() {
   if (ST.live.es) { ST.live.es.close(); ST.live.es = null; }
 }
+async function sendToArchitect(message) {
+  const r = await fetch('/api/run', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message, agent: HUBCFG.id }),
+  });
+  const out = await r.json();
+  if (!out.ok) throw new Error(out.error || '?');
+}
 async function dispatchReal() {
   const msg = taskIn.value.trim();
   if (!msg) { taskIn.focus(); return; }
   runBtn.disabled = true;
   try {
-    const r = await fetch('/api/run', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: msg, agent: HUBCFG.id }),
-    });
-    const out = await r.json();
-    if (!out.ok) feedLine('fail', '<span class="tag">[BRIDGE]</span> error al despachar: ' + (out.error || '?'));
-    else taskIn.value = '';
+    await sendToArchitect(msg);
+    taskIn.value = '';
   } catch (e) {
     feedLine('fail', '<span class="tag">[BRIDGE]</span> no pude despachar: ' + e.message);
   } finally {
     runBtn.disabled = false;
   }
+}
+
+/* ============================================================
+   COMPOSER (paste text/code/images, dispatch to the hub)
+   ============================================================ */
+const compEl = $('composer'), compText = $('compText'), compDir = $('compDir'),
+  compImgs = $('compImgs'), compSend = $('compSend');
+const pendingImgs = []; // { name, dataBase64, preview }
+
+function compRenderImgs() {
+  compImgs.innerHTML = '';
+  pendingImgs.forEach((im, i) => {
+    const d = document.createElement('div');
+    d.className = 'comp-img';
+    d.innerHTML = '<img src="' + im.preview + '" alt=""><button title="Quitar">×</button>';
+    d.querySelector('button').addEventListener('click', () => { pendingImgs.splice(i, 1); compRenderImgs(); });
+    compImgs.appendChild(d);
+  });
+}
+function compAddImageFile(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  const rd = new FileReader();
+  rd.onload = () => {
+    const dataUrl = String(rd.result);
+    pendingImgs.push({
+      name: file.name || ('pasted' + (file.type.split('/')[1] ? '.' + file.type.split('/')[1] : '.png')),
+      dataBase64: dataUrl.split(',')[1],
+      preview: dataUrl,
+    });
+    compRenderImgs();
+  };
+  rd.readAsDataURL(file);
+}
+if (compEl) {
+  compText.addEventListener('paste', (e) => {
+    for (const item of (e.clipboardData?.items || [])) {
+      if (item.type.startsWith('image/')) { e.preventDefault(); compAddImageFile(item.getAsFile()); }
+    }
+  });
+  ['dragover', 'dragleave', 'drop'].forEach(evName => {
+    compEl.addEventListener(evName, (e) => {
+      e.preventDefault();
+      compEl.classList.toggle('dragover', evName === 'dragover');
+      if (evName === 'drop') [...(e.dataTransfer?.files || [])].forEach(compAddImageFile);
+    });
+  });
+  compDir.value = localStorage.getItem('stackops-projectdir') || '';
+  compDir.addEventListener('change', () => localStorage.setItem('stackops-projectdir', compDir.value.trim()));
+
+  async function compDispatch() {
+    if (ST.mode !== 'live') { feedLine('sys', '<span class="tag">[COMPOSER]</span> cambia a modo LIVE para despachar de verdad'); return; }
+    const text = compText.value.trim();
+    const dir = compDir.value.trim();
+    if (!text && !pendingImgs.length) { compText.focus(); return; }
+    compSend.disabled = true;
+    compSend.textContent = '… despachando';
+    try {
+      // upload images first so file-reading runtimes can open them
+      const savedPaths = [];
+      for (const im of pendingImgs) {
+        const r = await fetch('/api/upload', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: im.name, dataBase64: im.dataBase64, dir: dir || undefined }),
+        });
+        const out = await r.json();
+        if (!out.ok) throw new Error('imagen: ' + (out.error || '?'));
+        savedPaths.push(out.path);
+      }
+      let message = '';
+      if (dir) message += 'Trabaja en ' + dir + ' (carpeta del proyecto, rutas absolutas).\n\n';
+      message += text;
+      if (savedPaths.length) {
+        message += '\n\nIMÁGENES ADJUNTAS (léelas desde disco antes de empezar):\n' + savedPaths.map(p => '- ' + p).join('\n');
+      }
+      await sendToArchitect(message);
+      compText.value = '';
+      pendingImgs.length = 0;
+      compRenderImgs();
+      feedLine('sys', '<span class="tag">[COMPOSER]</span> tarea despachada' + (savedPaths.length ? ' con ' + savedPaths.length + ' imagen(es)' : ''));
+    } catch (e) {
+      feedLine('fail', '<span class="tag">[COMPOSER]</span> ' + e.message);
+    } finally {
+      compSend.disabled = false;
+      compSend.textContent = '▶ Despachar al ARCHITECT';
+    }
+  }
+  compSend.addEventListener('click', compDispatch);
+  compText.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); compDispatch(); }
+  });
 }
 
 /* ============================================================
@@ -848,22 +943,23 @@ function loadScript(s) {
   Object.values(rosterEls).forEach(r => { const c = r.querySelector('.sharp'); c.textContent = '·'; c.className = 'sharp'; });
   Object.values(nodeEls).forEach(n => { const b = n.querySelector && n.querySelector('.sharpbadge'); if (b) { b.textContent = ''; b.classList.remove('show', 'ok', 'warn'); } });
   clearTimelineBars();
-  $('tlTitle').textContent = 'TIMELINE · PLAN VS EJECUCIÓN';
-  const total = ST.script.total;
-  ST.script.events.forEach(ev => {
-    if (ev.type !== 'work') return;
-    const track = tlRows[ev.a].querySelector('.tl-track');
-    const bar = document.createElement('div');
-    bar.className = 'tl-bar';
-    bar.style.left = (ev.t / total * 100) + '%';
-    bar.style.width = (ev.dur / total * 100) + '%';
-    const fill = document.createElement('i');
-    fill.style.background = gcol(ev.a);
-    bar.appendChild(fill);
-    track.appendChild(bar);
-    tlBarEls.push({ ev, fill });
-  });
-  ALL.forEach(id => { if (!ST.script.involved.includes(id)) tlRows[id].dataset.st = 'skip'; });
+  if (tlWrap) {
+    const total = ST.script.total;
+    ST.script.events.forEach(ev => {
+      if (ev.type !== 'work' || !tlRows[ev.a]) return;
+      const track = tlRows[ev.a].querySelector('.tl-track');
+      const bar = document.createElement('div');
+      bar.className = 'tl-bar';
+      bar.style.left = (ev.t / total * 100) + '%';
+      bar.style.width = (ev.dur / total * 100) + '%';
+      const fill = document.createElement('i');
+      fill.style.background = gcol(ev.a);
+      bar.appendChild(fill);
+      track.appendChild(bar);
+      tlBarEls.push({ ev, fill });
+    });
+    ALL.forEach(id => { if (tlRows[id] && !ST.script.involved.includes(id)) tlRows[id].dataset.st = 'skip'; });
+  }
   feed.innerHTML = '';
   feedLine('sys', '<span class="tag">[ARCH]</span> Plan cargado: «' + s.task + '» · ' + s.involved.length + ' capas');
   setPill('ready', 'PLAN LISTO');
@@ -909,6 +1005,8 @@ function setMode(mode) {
   $('modeLive').classList.toggle('on', mode === 'live');
   $('modeDemo').classList.toggle('on', mode === 'demo');
   $('chips').classList.toggle('hidden', mode === 'live');
+  const comp = $('composer');
+  if (comp) comp.classList.toggle('demo-disabled', mode !== 'live');
   speedSel.style.display = mode === 'live' ? 'none' : '';
   pauseBtn.style.display = mode === 'live' ? 'none' : '';
   resetBtn.style.display = mode === 'live' ? 'none' : '';
@@ -929,7 +1027,6 @@ function setMode(mode) {
     hint.textContent = 'Conectando al bridge…';
     hint.classList.remove('off');
     runBtn.disabled = false; pauseBtn.disabled = true; resetBtn.disabled = true;
-    $('tlTitle').textContent = 'TIMELINE · RUNS REALES';
     connectLive();
   } else {
     disconnectLive();
