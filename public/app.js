@@ -586,10 +586,10 @@ function connectLive() {
 function disconnectLive() {
   if (ST.live.es) { ST.live.es.close(); ST.live.es = null; }
 }
-async function sendToArchitect(message) {
+async function sendToArchitect(message, sessionKey) {
   const r = await fetch('/api/run', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, agent: HUBCFG.id }),
+    body: JSON.stringify({ message, agent: HUBCFG.id, sessionKey }),
   });
   const out = await r.json();
   if (!out.ok) throw new Error(out.error || '?');
@@ -680,7 +680,11 @@ if (compEl) {
       if (savedPaths.length) {
         message += '\n\nIMÁGENES ADJUNTAS (léelas desde disco antes de empezar):\n' + savedPaths.map(p => '- ' + p).join('\n');
       }
-      await sendToArchitect(message);
+      // Per-project session: each project folder gets its own clean architect thread.
+      const sessionKey = dir
+        ? 'p-' + dir.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(-40)
+        : undefined;
+      await sendToArchitect(message, sessionKey);
       compText.value = '';
       pendingImgs.length = 0;
       compRenderImgs();

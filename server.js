@@ -232,16 +232,18 @@ function extractReply(raw) {
   return excerpt(lines.join(' '), 500);
 }
 
-function dispatchRun(message, agent) {
+function dispatchRun(message, agent, sessionKey) {
   return new Promise((resolve, reject) => {
     const target = (agent || 'architect').replace(/[^a-zA-Z0-9_-]/g, '');
     const clean = String(message || '').trim();
     if (!clean) return reject(new Error('mensaje vacío'));
+    const sk = sessionKey ? String(sessionKey).replace(/[^a-zA-Z0-9:_-]/g, '').slice(0, 80) : null;
     const logPath = path.join(__dirname, 'dispatch.log');
-    fs.appendFileSync(logPath, `\n[${new Date().toISOString()}] dispatch → ${target}: ${clean.slice(0, 120)}\n`);
+    fs.appendFileSync(logPath, `\n[${new Date().toISOString()}] dispatch → ${target}${sk ? ` (session ${sk})` : ''}: ${clean.slice(0, 120)}\n`);
 
     const entry = resolveCliEntry();
     const args = ['agent', '--agent', target, '-m', clean];
+    if (sk) args.push('--session-key', sk);
     let child;
     if (entry) {
       // Direct node spawn: hidden window, exact args, full output capture.
@@ -362,8 +364,8 @@ const server = http.createServer((req, res) => {
     req.on('data', c => { body += c; if (body.length > 64 * 1024) req.destroy(); });
     req.on('end', async () => {
       try {
-        const { message, agent } = JSON.parse(body || '{}');
-        const out = await dispatchRun(message, agent);
+        const { message, agent, sessionKey } = JSON.parse(body || '{}');
+        const out = await dispatchRun(message, agent, sessionKey);
         json(res, 200, out);
       } catch (err) {
         json(res, 400, { ok: false, error: String(err.message || err) });
