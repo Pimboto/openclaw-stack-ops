@@ -454,24 +454,45 @@ const sitrep = {
 };
 const SITREP_MIN_MS = 60000;
 
+// Tasks "running" for longer than this are crash leftovers (the gateway's own
+// watchdogs cap real runs at 1h) — feeding them to the narrator as live work
+// derails it into contradictions.
+const SITREP_GHOST_MS = 4 * 60 * 60 * 1000;
+
 function buildSitrepPrompt() {
+  const now = Date.now();
+  const hhmm = ms => new Date(ms).toLocaleTimeString('en-US', { hour12: true, hour: 'numeric', minute: '2-digit' });
   const active = [...state.tasks.values()]
-    .filter(t => t.status === 'running' || t.status === 'queued')
+    .filter(t => (t.status === 'running' || t.status === 'queued')
+      && t.startedAt && (now - t.startedAt) < SITREP_GHOST_MS)
     .slice(0, 30) // cap: Windows CreateProcess args ~32KB, an unbounded list breaks spawn silently
-    .map(t => `- ${t.child}: ${excerpt(t.title, 80)}`);
+    .map(t => `- ${t.child} (desde ${hhmm(t.startedAt)}): ${excerpt(t.title, 80)}`);
   const recent = state.events.slice(-30).map(e => {
     const arrow = e.to ? `${e.a || '?'}→${e.to}` : (e.a || '?');
     const sh = e.sharp ? ` SHARP=${e.sharp.total}/25 ${e.sharp.verdict}` : '';
-    return `[${e.type}] ${arrow}: ${excerpt(e.text || '', 80)}${sh}`;
+    const proj = e.session ? ` [proyecto ${e.session}]` : '';
+    return `${hhmm(e.t || now)} [${e.type}]${proj} ${arrow}: ${excerpt(e.text || '', 80)}${sh}`;
   });
   return [
-    'Tareas activas:',
-    active.length ? active.join('\n') : '(ninguna)',
+    'Eres SITREP, el narrador de estado embebido en el panel de monitoreo de una flota',
+    'multi-agente de OpenClaw (un orquestador "architect" reparte trabajo a agentes',
+    'especialistas por capa; agentes "-critic" revisan con la rúbrica SHARP, gate >=20/25).',
+    'Tu salida se muestra TAL CUAL en el panel, sin intervención humana.',
+    '',
+    'REGLAS ABSOLUTAS:',
+    '- Devuelve ÚNICAMENTE el resumen: 2-3 frases en español, sin markdown ni preámbulo.',
+    '- NUNCA hagas preguntas, NUNCA pidas contexto, NUNCA digas que falta información.',
+    '- Si no hay tareas activas: di que la flota está en reposo y cuál fue el último',
+    '  movimiento relevante con su hora.',
+    '- Nombra agentes y proyectos tal como aparecen; los veredictos SHARP son noticia.',
+    '',
+    `Hora actual: ${hhmm(now)}.`,
+    '',
+    'Tareas activas AHORA (filtradas, sin residuos de crashes):',
+    active.length ? active.join('\n') : '(ninguna — flota en reposo)',
     '',
     'Eventos recientes (más nuevos al final):',
     recent.length ? recent.join('\n') : '(ninguno)',
-    '',
-    'Resume en 2-3 frases en español qué está haciendo el sistema AHORA MISMO para una operadora; sin markdown, sin preámbulo.',
   ].join('\n');
 }
 
