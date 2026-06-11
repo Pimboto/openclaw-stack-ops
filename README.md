@@ -1,32 +1,32 @@
 # OpenClaw Stack Ops
 
 **Live mission-control UI for multi-agent [OpenClaw](https://openclaw.ai) fleets.**
-Watch your orchestrator fan out work to specialist agents and their architecture critics — spawns, completions, failures and SHARP quality scores — in real time, on a radial map of your whole stack.
+Watch your orchestrator fan out work to specialist agents and their architecture critics â€” spawns, completions, failures and SHARP quality scores â€” in real time, on a radial map of your whole stack.
 
-> Built for setups where one **orchestrator** agent (e.g. `architect`) delegates to **specialist** agents via `sessions_spawn`, and each specialist is paired with an **architecture critic** that scores its work with a SHARP rubric (`SHARP: S=4 H=5 A=4 R=4 P=5 TOTAL=22/25 VERDICT=APPROVE`). Any other multi-agent topology works too — the roster is fully configurable.
+> Built for setups where one **orchestrator** agent (e.g. `architect`) delegates to **specialist** agents via `sessions_spawn`, and each specialist is paired with an **architecture critic** that scores its work with a SHARP rubric (`SHARP: S=4 H=5 A=4 R=4 P=5 TOTAL=22/25 VERDICT=APPROVE`). Any other multi-agent topology works too â€” the roster is fully configurable.
 
 ## What you get
 
-- **Radial stack map** — your orchestrator in the center, specialist layers in a ring, critics as satellites. Nodes light up while agents work; particles trace every handoff.
-- **LIVE mode** — real events from your running OpenClaw gateway: sub-agent spawns, completions, failures, and parsed **SHARP scores** as badges per layer.
-- **Dispatch from the UI** — type a task, hit ▶, and it runs `openclaw agent --agent <orchestrator> -m "<task>"` for real.
-- **Per-agent panel** — current task, last SHARP breakdown (S/H/A/R/P grid), collaborators, recent messages.
-- **Real timeline** — bars per layer from actual task start/end timestamps (critic runs drawn dimmed on their layer's row).
-- **DEMO mode** — a scripted simulator (no gateway needed) to demo the concept or develop the UI.
+- **Radial stack map** â€” your orchestrator in the center, specialist layers in a ring, critics as satellites. Nodes light up while agents work; particles trace every handoff.
+- **LIVE mode** â€” real events from your running OpenClaw gateway: sub-agent spawns, completions, failures, and parsed **SHARP scores** as badges per layer.
+- **Dispatch from the UI** â€” type a task, hit â–¶, and it runs `openclaw agent --agent <orchestrator> -m "<task>"` for real.
+- **Per-agent panel** â€” current task, last SHARP breakdown (S/H/A/R/P grid), collaborators, recent messages.
+- **Real timeline** â€” bars per layer from actual task start/end timestamps (critic runs drawn dimmed on their layer's row).
+- **DEMO mode** â€” a scripted simulator (no gateway needed) to demo the concept or develop the UI.
 
 ## Requirements
 
-- Node.js ≥ 18
+- Node.js â‰¥ 18
 - [OpenClaw](https://openclaw.ai) CLI installed and a **running gateway** (`openclaw gateway status`)
 - A multi-agent setup (`openclaw agents list`)
 
 ## Quickstart
 
 ```bash
-git clone https://github.com/<you>/openclaw-stack-ops
+git clone https://github.com/Pimboto/openclaw-stack-ops
 cd openclaw-stack-ops
 node server.js
-# → http://127.0.0.1:7788
+# â†’ http://127.0.0.1:7788
 ```
 
 The bridge auto-connects to your local OpenClaw CLI. If the gateway is up you'll land in **LIVE** mode with your task history already on screen.
@@ -37,28 +37,28 @@ Edit [`public/agents.js`](public/agents.js):
 
 ```js
 window.STACKOPS = {
-  hub: { id: 'architect', code: 'ARCH', cap: 'ARCHITECT', desc: '…' },
-  groups: { build: { label: 'BUILD', c: '#ff5c45' }, /* … */ },
+  hub: { id: 'architect', code: 'ARCH', cap: 'ARCHITECT', desc: 'â€¦' },
+  groups: { build: { label: 'BUILD', c: '#ff5c45' }, /* â€¦ */ },
   agents: [
     { id: 'database-storage', code: 'DB', cap: 'Database', g: 'build',
-      critic: 'database-storage-critic', desc: '…' },
-    // … your layers
+      critic: 'database-storage-critic', desc: 'â€¦' },
+    // â€¦ your layers
   ],
 };
 ```
 
 - `id` must match your OpenClaw agent ids exactly (`openclaw agents list`).
-- `critic` is optional — if present it's drawn as a satellite and its SHARP verdicts badge the parent layer.
+- `critic` is optional â€” if present it's drawn as a satellite and its SHARP verdicts badge the parent layer.
 - Agents that show up at runtime but aren't listed are added automatically to an "OTROS" group, so nothing breaks.
 
-Bridge options (env vars): `PORT` (7788), `HOST` (127.0.0.1), `OPENCLAW_BIN` (openclaw), `POLL_MS` (2500), `STACKOPS_TOKEN` (unset — set it to require auth before exposing the bridge; see [Security notes](#security-notes)), `STACKOPS_PROJECTS_ROOT` (`C:\Work` — folder scanned by the projects API), `STACKOPS_NARRATOR_MODEL` (`haiku` — model used by the SITREP narrator).
+Bridge options (env vars): `PORT` (7788), `HOST` (127.0.0.1), `OPENCLAW_BIN` (openclaw), `POLL_MS` (2500), `STACKOPS_TOKEN` (unset â€” set it to require auth before exposing the bridge; see [Security notes](#security-notes)), `STACKOPS_PROJECTS_ROOT` (`C:\Work` â€” folder scanned by the projects API), `STACKOPS_NARRATOR_MODEL` (`haiku` â€” model used by the SITREP narrator).
 
 ## How it works
 
 ```
-openclaw CLI (--json) ──poll──> server.js (zero-dep bridge) ──SSE──> browser UI
-                                   │
-                                   └── POST /api/run → openclaw agent --agent <hub> -m "…"
+openclaw CLI (--json) â”€â”€pollâ”€â”€> server.js (zero-dep bridge) â”€â”€SSEâ”€â”€> browser UI
+                                   â”‚
+                                   â””â”€â”€ POST /api/run â†’ openclaw agent --agent <hub> -m "â€¦"
 ```
 
 The bridge polls `openclaw tasks list --json`, diffs task state, parses agent ids out of session keys (`agent:<id>:subagent:<run>`), extracts SHARP lines with a regex, and streams normalized events:
@@ -66,27 +66,27 @@ The bridge polls `openclaw tasks list --json`, diffs task state, parses agent id
 ```jsonc
 { "t": 1781032029769, "type": "spawn|work|done|fail|sys|snapshot",
   "a": "architect", "to": "database-storage",
-  "text": "…", "taskId": "…", "critic": false,
+  "text": "â€¦", "taskId": "â€¦", "critic": false,
   "session": "p-c-work-onlyreels",
   "sharp": { "S": 4, "H": 5, "A": 4, "R": 4, "P": 5, "total": 22, "verdict": "APPROVE" } }
 ```
 
-- `session` *(optional)* — the project-thread id of the dispatching session, parsed
+- `session` *(optional)* â€” the project-thread id of the dispatching session, parsed
   from a `agent:<orchestrator>:p-<slug>` requester key (e.g. `p-c-work-onlyreels`).
   Lets the UI filter the feed per project. Absent on main/subagent/legacy sessions
-  and on global `sys` events — the UI routes those to a shared "global" view.
+  and on global `sys` events â€” the UI routes those to a shared "global" view.
 
-Anything that speaks this shape can feed the UI — the simulator uses the exact same contract. The contract is additive-only: new fields may appear, existing ones never change shape.
+Anything that speaks this shape can feed the UI â€” the simulator uses the exact same contract. The contract is additive-only: new fields may appear, existing ones never change shape.
 
 ## HTTP API
 
 All routes below live under `/api/*` and are therefore covered by the
-`STACKOPS_TOKEN` auth gate automatically — when a token is set, each call must
+`STACKOPS_TOKEN` auth gate automatically â€” when a token is set, each call must
 carry it (see [Security notes](#security-notes)).
 
 ### Projects (`STACKOPS_PROJECTS_ROOT`, default `C:\Work`)
 
-`GET /api/projects` — list the direct subfolders of the projects root (files and
+`GET /api/projects` â€” list the direct subfolders of the projects root (files and
 folders starting with `.` or `_` are ignored; per-folder read errors are skipped,
 never fatal):
 
@@ -102,19 +102,19 @@ never fatal):
 `slice(-40)` is applied to the normalized body **before** the `p-` prefix.
 `hasThread` is true when any known task has `session === slug`.
 
-`POST /api/projects` `{ "name": "My Project" }` — create a new project folder
+`POST /api/projects` `{ "name": "My Project" }` â€” create a new project folder
 under the root plus a minimal Spanish `AGENTS.md` starter:
 
 ```jsonc
 { "ok": true, "name": "My Project", "dir": "C:\\Work\\My Project", "slug": "p-c-work-my-project" }
 ```
 
-- `name` must match `^[A-Za-z0-9][A-Za-z0-9 ._-]{0,49}$` and contain no `..` → otherwise `400`.
-- Folder already exists → `409 { "ok": false, "error": "el proyecto ya existe" }`.
+- `name` must match `^[A-Za-z0-9][A-Za-z0-9 ._-]{0,49}$` and contain no `..` â†’ otherwise `400`.
+- Folder already exists â†’ `409 { "ok": false, "error": "el proyecto ya existe" }`.
 
 ### Per-agent model
 
-`GET /api/agents/models` — per-agent model overrides plus the fleet default
+`GET /api/agents/models` â€” per-agent model overrides plus the fleet default
 (`model` is `null` when the agent inherits the default):
 
 ```jsonc
@@ -123,7 +123,7 @@ under the root plus a minimal Spanish `AGENTS.md` starter:
               { "id": "main", "model": null } ] }
 ```
 
-`PUT /api/agents/<id>/model` `{ "model": "anthropic/claude-sonnet-4-6" }` — set
+`PUT /api/agents/<id>/model` `{ "model": "anthropic/claude-sonnet-4-6" }` â€” set
 or clear one agent's model override (`POST` to the same path is also accepted).
 `model` is validated against `^[a-z0-9/._-]+$/i`; `""` or `null` removes the
 override (the agent falls back to the fleet default). Same flow as `/api/fleet`:
@@ -135,24 +135,24 @@ and errors on failure), restarts the gateway (90s timeout), and pushes a Spanish
 { "ok": true, "id": "architect", "model": "anthropic/claude-sonnet-4-6", "restarted": true }
 ```
 
-Unknown `<id>` → `404`. The endpoint restarts the gateway itself; surfacing the
+Unknown `<id>` â†’ `404`. The endpoint restarts the gateway itself; surfacing the
 `running` count from the GET so the UI can warn about active tasks is the UI's job.
 
 ### SITREP (AI narrator, `STACKOPS_NARRATOR_MODEL`, default `haiku`)
 
-`GET /api/sitrep` — a 2–3 sentence Spanish status of what the fleet is doing
+`GET /api/sitrep` â€” a 2â€“3 sentence Spanish status of what the fleet is doing
 right now, generated by the local `claude` CLI:
 
 ```jsonc
-{ "ok": true, "text": "El arquitecto está repartiendo trabajo a dos especialistas…", "t": 1781032029769, "model": "haiku" }
+{ "ok": true, "text": "El arquitecto estÃ¡ repartiendo trabajo a dos especialistasâ€¦", "t": 1781032029769, "model": "haiku" }
 ```
 
-- If the `claude` CLI isn't found → `{ "ok": false, "disabled": true }` (always; the UI hides the panel).
-- Before the first generation → `{ "ok": true, "text": null, "t": null, "model": "haiku" }`.
+- If the `claude` CLI isn't found â†’ `{ "ok": false, "disabled": true }` (always; the UI hides the panel).
+- Before the first generation â†’ `{ "ok": true, "text": null, "t": null, "model": "haiku" }`.
 - Server-side throttle: regenerates at most once every 60s, and only when there
   are active tasks or new events since the last attempt; otherwise returns the
   cached text. An in-flight lock prevents stampedes; CLI errors keep the last good
-  text and never return 500. Generation happens **only** on request — never in the poll loop.
+  text and never return 500. Generation happens **only** on request â€” never in the poll loop.
 
 ## SHARP rubric (the quality gate)
 
@@ -164,17 +164,17 @@ SHARP: S=4 H=5 A=4 R=4 P=5 TOTAL=22/25 VERDICT=APPROVE
 
 | Dim | Meaning |
 |---|---|
-| S | Structural soundness — boundaries, coupling/cohesion |
+| S | Structural soundness â€” boundaries, coupling/cohesion |
 | H | Handles failure & scale |
 | A | Appropriate patterns (not cargo-culted) |
 | R | Resilience to change |
-| P | Pragmatism — no over-engineering |
+| P | Pragmatism â€” no over-engineering |
 
-Gate: **total ≥ 20 and no dimension ≤ 2**.
+Gate: **total â‰¥ 20 and no dimension â‰¤ 2**.
 
 ## Security notes
 
-- The bridge binds to `127.0.0.1` by default. It can **dispatch real agent runs** — do not expose it to the network without auth.
+- The bridge binds to `127.0.0.1` by default. It can **dispatch real agent runs** â€” do not expose it to the network without auth.
 - It shells out to your local `openclaw` CLI and inherits its credentials; it stores none of its own.
 - On Windows, double quotes in dispatched messages are converted to single quotes (cmd quoting limitation).
 
@@ -195,18 +195,18 @@ When `STACKOPS_TOKEN` is set, every `/api/*` and `/events` request must carry it
 - `X-Stackops-Token: <token>` header, or
 - `?token=<token>` query param (used by `EventSource`, which can't send headers).
 
-What the **server guarantees**: a missing or wrong token → `401 {"ok":false,"error":"token requerido"}`
+What the **server guarantees**: a missing or wrong token â†’ `401 {"ok":false,"error":"token requerido"}`
 on every `/api/*` and `/events` request; the token may arrive by any of the three forms
 above; static files (`/`, `*.js`, `*.css`) are always served without a token so the UI
-can load to ask for it — they expose no fleet data; and the comparison is timing-safe
+can load to ask for it â€” they expose no fleet data; and the comparison is timing-safe
 (SHA-256 digests via `crypto.timingSafeEqual`).
 
 On top of that contract, the **Stack Ops UI** handles the 401 for you: it prompts for the
 token once, stores it in `localStorage` (`stackops-token`), then sends it as a `Bearer`
 header on fetches and as a `?token=` query param on the `EventSource` for subsequent loads.
 
-> ⚠️ **Never bind off `127.0.0.1` without `STACKOPS_TOKEN`.** `/api/run` dispatches real
-> agents with your CLI credentials — an open port is remote code execution on your fleet.
+> âš ï¸ **Never bind off `127.0.0.1` without `STACKOPS_TOKEN`.** `/api/run` dispatches real
+> agents with your CLI credentials â€” an open port is remote code execution on your fleet.
 
 ## License
 

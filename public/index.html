@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OpenClaw · Stack Ops</title>
+<title>OpenClaw Â· Stack Ops</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -16,11 +16,11 @@
   <header class="bar">
     <div class="brand">
       <pre class="claw" aria-hidden="true">(\/)
-(°°)
+(Â°Â°)
 /||\</pre>
       <div class="brandtxt">
         <h1>STACK <span class="braces">{<span id="brandWord">ops</span>}</span></h1>
-        <div class="sub">ORQUESTADOR · ESPECIALISTAS · CRÍTICOS</div>
+        <div class="sub">ORQUESTADOR Â· ESPECIALISTAS Â· CRÃTICOS</div>
       </div>
     </div>
 
@@ -34,7 +34,7 @@
         <option value="anthropic/claude-sonnet-4-6">Sonnet 4.6</option>
         <option value="anthropic/claude-opus-4-7">Opus 4.7</option>
         <option value="anthropic/claude-haiku-4-5-20251001">Haiku 4.5</option>
-        <option value="anthropic/claude-fable-5">Fable 5 ⚠</option>
+        <option value="anthropic/claude-fable-5">Fable 5 âš </option>
       </select>
       <select id="fleetThinking" aria-label="Effort de la flota">
         <option value="off">effort: off</option>
@@ -47,17 +47,17 @@
       <button class="btn" id="fleetApply">Aplicar</button>
     </div>
 
-    <!-- project picker (live only) — custom dropdown, filters feed / graph / stats -->
-    <div class="project" id="projectWrap" title="Proyecto activo — filtra el feed, el grafo y las stats por su hilo de sesión">
+    <!-- project picker (live only) â€” custom dropdown, filters feed / graph / stats -->
+    <div class="project" id="projectWrap" title="Proyecto activo â€” filtra el feed, el grafo y las stats por su hilo de sesiÃ³n">
       <span class="plbl">PROYECTO</span>
       <div class="picker" id="projectPicker" data-open="0">
         <button class="picker-btn" id="projectBtn" aria-haspopup="listbox" aria-expanded="false">
           <span class="pk-name" id="pkName">GLOBAL</span>
           <span class="pk-path" id="pkPath"></span>
-          <span class="pk-caret" aria-hidden="true">▾</span>
+          <span class="pk-caret" aria-hidden="true">â–¾</span>
         </button>
         <div class="picker-pop" id="projectPop" hidden role="dialog" aria-label="Elegir proyecto">
-          <input class="picker-search" id="projectSearch" placeholder="filtrar proyectos…" autocomplete="off">
+          <input class="picker-search" id="projectSearch" placeholder="filtrar proyectosâ€¦" autocomplete="off">
           <div class="picker-list" id="projectList" role="listbox"></div>
           <button class="picker-new" id="projectNew">+ nuevo proyecto</button>
         </div>
@@ -66,15 +66,15 @@
 
     <!-- demo simulator controls (demo only) -->
     <div class="demo-ctl" id="demoCtl" hidden>
-      <input id="task" type="text" placeholder="Escribe una tarea para el simulador…" autocomplete="off">
-      <button class="btn primary" id="run">▶ Ejecutar</button>
-      <button class="btn" id="pause" disabled>⏸ Pausar</button>
-      <button class="btn" id="reset" disabled>⟲ Reiniciar</button>
+      <input id="task" type="text" placeholder="Escribe una tarea para el simuladorâ€¦" autocomplete="off">
+      <button class="btn primary" id="run">â–¶ Ejecutar</button>
+      <button class="btn" id="pause" disabled>â¸ Pausar</button>
+      <button class="btn" id="reset" disabled>âŸ² Reiniciar</button>
       <select id="speed" title="Velocidad (solo demo)" aria-label="Velocidad del simulador">
-        <option value="0.5">0.5×</option>
-        <option value="1" selected>1×</option>
-        <option value="2">2×</option>
-        <option value="4">4×</option>
+        <option value="0.5">0.5Ã—</option>
+        <option value="1" selected>1Ã—</option>
+        <option value="2">2Ã—</option>
+        <option value="4">4Ã—</option>
       </select>
     </div>
   </header>
@@ -91,15 +91,15 @@
     <div class="stat"><span class="k" id="k2">TRABAJANDO AHORA</span><span class="v" id="stAg">0<small>/13</small></span></div>
     <div class="stat"><span class="k" id="k3">VENTANA</span><span class="v" id="stTime">00:00</span></div>
     <!-- honest burst metric (replaces the historical progress bar) -->
-    <div class="stat burst" id="burstStat" hidden><span class="k">RÁFAGA</span><span class="v" id="burstV">—</span></div>
+    <div class="stat burst" id="burstStat" hidden><span class="k">RÃFAGA</span><span class="v" id="burstV">â€”</span></div>
   </div>
 
-  <!-- SITREP strip (/SITREP — narrator) — shown only when the bridge enables it -->
+  <!-- SITREP strip (/SITREP â€” narrator) â€” shown only when the bridge enables it -->
   <div class="sitrep" id="sitrep" hidden>
     <span class="sitrep-h">SITREP</span>
-    <span class="sitrep-text" id="sitrepText">esperando actividad…</span>
+    <span class="sitrep-text" id="sitrepText">esperando actividadâ€¦</span>
     <span class="sitrep-time" id="sitrepTime"></span>
-    <button class="sitrep-refresh" id="sitrepRefresh" title="Refrescar" aria-label="Refrescar SITREP">⟳</button>
+    <button class="sitrep-refresh" id="sitrepRefresh" title="Refrescar" aria-label="Refrescar SITREP">âŸ³</button>
   </div>
 
   <!-- main grid -->
@@ -113,7 +113,7 @@
       <svg id="net" xmlns="http://www.w3.org/2000/svg"></svg>
       <canvas id="fx"></canvas>
       <div class="legend" id="legend"></div>
-      <div class="hint" id="hint">Conectando al gateway…</div>
+      <div class="hint" id="hint">Conectando al gatewayâ€¦</div>
     </section>
 
     <aside class="panelbox side">
@@ -126,37 +126,37 @@
     </aside>
 
     <!-- mobile-only toggle to reveal the radial map + roster (secondary on small screens) -->
-    <button class="graph-toggle" id="graphToggle" aria-expanded="false">▤ Mostrar mapa de la flota</button>
+    <button class="graph-toggle" id="graphToggle" aria-expanded="false">â–¤ Mostrar mapa de la flota</button>
   </main>
 
-  <!-- composer — THE single dispatch flow -->
+  <!-- composer â€” THE single dispatch flow -->
   <footer class="composer" id="composer">
     <div class="comp-head">
-      <span class="shead">COMPOSER · TAREA PARA EL ORQUESTADOR</span>
-      <span class="leg">pega texto, código o imágenes · Ctrl+Enter despacha</span>
+      <span class="shead">COMPOSER Â· TAREA PARA EL ORQUESTADOR</span>
+      <span class="leg">pega texto, cÃ³digo o imÃ¡genes Â· Ctrl+Enter despacha</span>
     </div>
-    <textarea id="compText" rows="5" placeholder="Escribe o pega aquí tu tarea completa: specs, código, contexto… También puedes pegar IMÁGENES (Ctrl+V) o arrastrarlas."></textarea>
+    <textarea id="compText" rows="5" placeholder="Escribe o pega aquÃ­ tu tarea completa: specs, cÃ³digo, contextoâ€¦ TambiÃ©n puedes pegar IMÃGENES (Ctrl+V) o arrastrarlas."></textarea>
     <div class="comp-imgs" id="compImgs"></div>
     <div class="comp-foot">
-      <!-- active project (read-only) + picker access — replaces the typed path -->
+      <!-- active project (read-only) + picker access â€” replaces the typed path -->
       <div class="comp-project" id="compProject">
         <span class="cp-lbl">PROYECTO</span>
         <span class="cp-name" id="cpName">GLOBAL</span>
         <span class="cp-path" id="cpPath"></span>
-        <button class="cp-change" id="cpChange" type="button">cambiar ▾</button>
+        <button class="cp-change" id="cpChange" type="button">cambiar â–¾</button>
       </div>
-      <!-- manual path fallback — only revealed if GET /api/projects fails -->
+      <!-- manual path fallback â€” only revealed if GET /api/projects fails -->
       <input id="compDir" type="text" list="compDirRecents" placeholder="Carpeta del proyecto (absoluta), ej: C:\Work\onlyreels" hidden>
       <datalist id="compDirRecents"></datalist>
       <span class="comp-thread" id="compThread" title="Cada proyecto tiene su propio hilo persistente con el architect"></span>
-      <button class="btn" id="compNew" title="Resetear la conversación de ESTE proyecto y limpiar su vista">↺ Nueva conv.</button>
-      <button class="btn primary" id="compSend">▶ Despachar al ARCHITECT</button>
+      <button class="btn" id="compNew" title="Resetear la conversaciÃ³n de ESTE proyecto y limpiar su vista">â†º Nueva conv.</button>
+      <button class="btn primary" id="compSend">â–¶ Despachar al ARCHITECT</button>
     </div>
   </footer>
 
   <div class="foot">
     <span id="footStatus">openclaw-stack-ops</span>
-    <span><a href="?demo=1" id="demoLink">modo demo</a> · <a href="https://github.com/" id="footLink">MIT · hecho para fleets multi-agente de OpenClaw</a></span>
+    <span><a href="?demo=1" id="demoLink">modo demo</a> Â· <a href="https://github.com/Pimboto/openclaw-stack-ops" id="footLink">MIT Â· hecho para fleets multi-agente de OpenClaw</a></span>
   </div>
 
 </div>
