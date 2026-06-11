@@ -70,6 +70,13 @@ function fmtTk(n) { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : Math.round(
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 function fmtT(s) { const m = Math.floor(s / 60), ss = Math.floor(s % 60); return String(m).padStart(2, '0') + ':' + String(ss).padStart(2, '0'); }
 function fmtClock(ms) { return new Date(ms).toLocaleTimeString('en-US', { hour12: true, hour: 'numeric', minute: '2-digit', second: '2-digit' }); }
+function fmtAgo(ms) {
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if (s < 60) return 'hace <1m';
+  if (s < 3600) return 'hace ' + Math.floor(s / 60) + 'm';
+  const h = Math.floor(s / 3600);
+  return 'hace ' + h + 'h ' + Math.floor((s % 3600) / 60) + 'm';
+}
 function ensureAgent(id) {
   // runtime discovery: unknown agent → add to "other"
   if (AG[id]) return;
@@ -607,7 +614,7 @@ function setStatLabels() {
     $('k0').textContent = 'RUNS COMPLETADOS';
     $('k1').textContent = 'SPAWNS DESPACHADOS';
     $('k2').textContent = 'TRABAJANDO AHORA';
-    $('k3').textContent = 'VENTANA';
+    $('k3').textContent = 'ÚLTIMA ACTIVIDAD';
   } else {
     $('k0').textContent = 'TOKENS QUEMADOS';
     $('k1').textContent = 'MENSAJES ENTRE AGENTES';
@@ -646,9 +653,10 @@ function updateStats() {
     cStMsg.set(tasks.length);
     const working = ALL.filter(id => ST.agents[id]?.status === 'work').length;
     setStAg(working);
-    const starts = tasks.map(t => t.start).filter(Boolean);
-    const t0 = starts.length ? Math.min(...starts) : null;
-    $('stTime').textContent = t0 ? fmtT((Date.now() - t0) / 1000) : '00:00';
+    // Most recent movement (start or end of any visible task) → "is it alive?"
+    const stamps = tasks.flatMap(t => [t.start, t.end]).filter(Boolean);
+    const tLast = stamps.length ? Math.max(...stamps) : null;
+    $('stTime').textContent = running > 0 ? 'AHORA' : (tLast ? fmtAgo(tLast) : '—');
     updateBurst(tasks, running);
   } else {
     ST.shownTk += (ST.totals.tk - ST.shownTk) * 0.09;
