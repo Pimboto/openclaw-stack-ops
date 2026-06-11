@@ -7,19 +7,29 @@
  * task state, parses SHARP score lines, and streams normalized events to
  * the browser over Server-Sent Events (SSE).
  *
- *   GET  /            → UI (static files from ./public)
- *   GET  /events      → SSE stream of live events
- *   GET  /api/state   → snapshot { tasks, events }
- *   POST /api/run     → { message, agent? } dispatch a real task via the CLI
+ *   GET  /                       → UI (static files from ./public)
+ *   GET  /events                 → SSE stream of live events
+ *   GET  /api/state              → snapshot { tasks, events }
+ *   POST /api/run                → { message, agent? } dispatch a real task via the CLI
+ *   GET  /api/projects           → list project folders under the projects root
+ *   POST /api/projects           → { name } create a new project folder + AGENTS.md
+ *   GET  /api/agents/models      → per-agent model overrides (+ fleet default)
+ *   PUT  /api/agents/<id>/model  → { model } set/clear one agent's model override
+ *   GET  /api/sitrep             → AI narrator: one-paragraph status of the fleet
+ *
+ * Every /api/* route (including the new ones above) is covered by the existing
+ * STACKOPS_TOKEN auth gate — no per-route auth wiring needed.
  *
  * Config (env vars):
- *   PORT            HTTP port            (default 7788)
- *   HOST            bind address         (default 127.0.0.1 — keep it local!)
- *   OPENCLAW_BIN    CLI command          (default "openclaw")
- *   POLL_MS         poll interval in ms  (default 2500)
- *   STACKOPS_TOKEN  shared secret        (unset = no auth; set = require token
- *                                         on /api/* and /events — needed before
- *                                         exposing the bridge off localhost)
+ *   PORT                   HTTP port            (default 7788)
+ *   HOST                   bind address         (default 127.0.0.1 — keep it local!)
+ *   OPENCLAW_BIN           CLI command          (default "openclaw")
+ *   POLL_MS                poll interval in ms  (default 2500)
+ *   STACKOPS_TOKEN         shared secret        (unset = no auth; set = require token
+ *                                                on /api/* and /events — needed before
+ *                                                exposing the bridge off localhost)
+ *   STACKOPS_PROJECTS_ROOT projects root dir    (default "C:\\Work")
+ *   STACKOPS_NARRATOR_MODEL sitrep narrator model (default "haiku")
  */
 'use strict';
 
@@ -27,7 +37,7 @@ const http = require('http');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
-const { exec, spawn } = require('child_process');
+const { exec, spawn, spawnSync } = require('child_process');
 
 const PORT = parseInt(process.env.PORT || '7788', 10);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -35,6 +45,8 @@ const BIN = process.env.OPENCLAW_BIN || 'openclaw';
 const POLL_MS = Math.max(1000, parseInt(process.env.POLL_MS || '2500', 10));
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const IS_WIN = process.platform === 'win32';
+const PROJECTS_ROOT = process.env.STACKOPS_PROJECTS_ROOT || 'C:\\Work';
+const NARRATOR_MODEL = process.env.STACKOPS_NARRATOR_MODEL || 'haiku';
 
 // Optional shared-secret auth. When STACKOPS_TOKEN is set, every /api/* and
 // /events request must present it (header or ?token=); static files stay open
@@ -55,6 +67,11 @@ const state = {
 const MAX_EVENTS = 1000;
 const sseClients = new Set();
 let firstPollDone = false;
+// Shared mutex for the two endpoints that read-modify-write openclaw.json
+// (POST /api/fleet and PUT /api/agents/<id>/model). Without it, two concurrent
+// writers race: each snapshots `original`, and a revert-on-invalid can clobber
+// the other's just-written change. One config write at a time → second gets 409.
+let configWriteInFlight = false;
 
 /* --------------------------- helpers ------------------------------ */
 
@@ -306,6 +323,184 @@ function dispatchRun(message, agent, sessionKey) {
   });
 }
 
+/* ------------------------- projects (F1) -------------------------- */
+
+// Shared path to the OpenClaw config (same file /api/fleet reads/writes).
+function openclawCfgPath() {
+  return path.join(process.env.USERPROFILE || process.env.HOME || '', '.openclaw', 'openclaw.json');
+}
+
+// Project-thread slug for a folder. MUST stay byte-for-byte identical to the UI
+// helper `projSlug` (public/app.js:84): operator precedence makes the method
+// chain (incl. slice(-40)) bind tighter than `+`, so slice(-40) is applied to
+// the normalized body BEFORE the 'p-' prefix is concatenated.
+function projectSlug(dir) {
+  return 'p-' + dir.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(-40);
+}
+
+function listProjects() {
+  const root = PROJECTS_ROOT;
+  let entries;
+  try { entries = fs.readdirSync(root, { withFileTypes: true }); }
+  catch { return { root, projects: [] }; } // root missing/unreadable → empty list, no crash
+  const projects = [];
+  for (const ent of entries) {
+    try {
+      if (!ent.isDirectory()) continue;            // direct subfolders only (skip files)
+      const name = ent.name;
+      if (name.startsWith('.') || name.startsWith('_')) continue; // ignore hidden/internal
+      const dir = path.join(root, name);
+      const slug = projectSlug(dir);
+      const hasAgentsMd = fs.existsSync(path.join(dir, 'AGENTS.md'));
+      const isGit = fs.existsSync(path.join(dir, '.git'));
+      const hasThread = [...state.tasks.values()].some(t => t.session === slug);
+      projects.push({ name, dir, slug, hasAgentsMd, isGit, hasThread });
+    } catch { /* tolerate a single unreadable folder (permissions) — keep going */ }
+  }
+  return { root, projects };
+}
+
+const PROJECT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,49}$/;
+
+function starterAgentsMd(name) {
+  // Minimal Spanish starter (UI text is Spanish; code/comments English).
+  return [
+    `# ${name}`,
+    '',
+    'Proyecto gestionado desde OpenClaw Stack Ops.',
+    '',
+    '## Stack',
+    '',
+    '- (describe aquí las tecnologías del proyecto)',
+    '',
+    '## Reglas',
+    '',
+    '- Código y comentarios en inglés; textos visibles en español.',
+    '- No introducir dependencias sin justificarlo.',
+    '- Cambios pequeños y verificables antes de continuar.',
+    '',
+  ].join('\n');
+}
+
+function createProject(name) {
+  const root = PROJECTS_ROOT;
+  // Hard validation: charset + length + no traversal + no trailing dot/space
+  // (Windows silently strips a trailing '.'/' ', so the real folder name would
+  // diverge from `name` and from the slug we return).
+  if (typeof name !== 'string' || !PROJECT_NAME_RE.test(name) || name.includes('..') || /[. ]$/.test(name)) {
+    throw Object.assign(new Error('nombre de proyecto inválido'), { code: 400 });
+  }
+  const dir = path.join(root, name);
+  // Defense-in-depth against traversal: resolved path must stay inside the root.
+  const rootResolved = path.resolve(root);
+  const dirResolved = path.resolve(dir);
+  if (dirResolved !== rootResolved && !dirResolved.startsWith(rootResolved + path.sep)) {
+    throw Object.assign(new Error('nombre de proyecto inválido'), { code: 400 });
+  }
+  // Ensure the root exists (recursive is EEXIST-safe), then create the project
+  // folder NON-recursively: a non-recursive mkdir throws EEXIST atomically if it
+  // already exists, closing the TOCTOU gap a separate existsSync() check leaves.
+  fs.mkdirSync(root, { recursive: true });
+  try {
+    fs.mkdirSync(dir);
+  } catch (err) {
+    if (err.code === 'EEXIST') throw Object.assign(new Error('el proyecto ya existe'), { code: 409 });
+    throw err;
+  }
+  fs.writeFileSync(path.join(dir, 'AGENTS.md'), starterAgentsMd(name), 'utf8');
+  return { name, dir, slug: projectSlug(dir) };
+}
+
+/* ------------------------- sitrep (F3) ---------------------------- */
+
+// Cached CLI detection (resolveCliEntry-style): does the `claude` CLI exist?
+// null = not yet probed; {ok, path} thereafter. claude.exe is a real binary on
+// this box, so we can spawn the resolved path directly — no shell needed.
+let claudeCli = null;
+function detectClaude() {
+  if (claudeCli !== null) return claudeCli;
+  try {
+    const probe = IS_WIN ? 'where' : 'which';
+    const r = spawnSync(probe, ['claude'], { windowsHide: true, timeout: 5000 });
+    if (r.status === 0) {
+      const lines = String(r.stdout || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+      if (IS_WIN) {
+        // spawn() with no shell can't launch a .cmd/.ps1 shim (EINVAL on Node
+        // >=18.20), and `where` may list that shim first. Prefer a real .exe;
+        // if PATH only has shims, degrade to disabled rather than spawn a dud.
+        const exe = lines.find(l => /\.exe$/i.test(l));
+        if (exe) { claudeCli = { ok: true, path: exe }; return claudeCli; }
+        if (lines.length) { claudeCli = { ok: false, path: '' }; return claudeCli; }
+      } else if (lines[0]) {
+        claudeCli = { ok: true, path: lines[0] }; return claudeCli;
+      }
+    }
+  } catch { /* fall through to a version probe */ }
+  // Fallback probe for environments without where/which on PATH.
+  try {
+    const r = spawnSync('claude', ['--version'], { windowsHide: true, timeout: 6000, shell: IS_WIN });
+    claudeCli = { ok: r.status === 0, path: 'claude' };
+  } catch { claudeCli = { ok: false, path: '' }; }
+  return claudeCli;
+}
+
+const sitrep = {
+  text: null,        // last good narration (kept across CLI failures)
+  t: null,           // timestamp of last good narration
+  inFlight: false,   // anti-stampede lock: one generation at a time
+  lastAttempt: 0,    // throttle marker (success OR failure) — caps gen to 1/60s
+  lastCount: 0,      // ring length at last attempt
+  lastT: 0,          // newest ring event timestamp at last attempt
+};
+const SITREP_MIN_MS = 60000;
+
+function buildSitrepPrompt() {
+  const active = [...state.tasks.values()]
+    .filter(t => t.status === 'running' || t.status === 'queued')
+    .slice(0, 30) // cap: Windows CreateProcess args ~32KB, an unbounded list breaks spawn silently
+    .map(t => `- ${t.child}: ${excerpt(t.title, 80)}`);
+  const recent = state.events.slice(-30).map(e => {
+    const arrow = e.to ? `${e.a || '?'}→${e.to}` : (e.a || '?');
+    const sh = e.sharp ? ` SHARP=${e.sharp.total}/25 ${e.sharp.verdict}` : '';
+    return `[${e.type}] ${arrow}: ${excerpt(e.text || '', 80)}${sh}`;
+  });
+  return [
+    'Tareas activas:',
+    active.length ? active.join('\n') : '(ninguna)',
+    '',
+    'Eventos recientes (más nuevos al final):',
+    recent.length ? recent.join('\n') : '(ninguno)',
+    '',
+    'Resume en 2-3 frases en español qué está haciendo el sistema AHORA MISMO para una operadora; sin markdown, sin preámbulo.',
+  ].join('\n');
+}
+
+// Spawn the narrator with no shell (direct args, windowsHide), kill on timeout.
+// Never throws: resolves to a sanitized string, or null on any failure.
+function generateSitrep() {
+  return new Promise((resolve) => {
+    const cli = detectClaude();
+    if (!cli.ok) return resolve(null);
+    const args = ['-p', buildSitrepPrompt(), '--model', NARRATOR_MODEL];
+    let child;
+    try {
+      child = spawn(cli.path, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (err) { log('sitrep spawn error:', String(err.message || err)); return resolve(null); }
+    let out = '', errOut = '';
+    const killTimer = setTimeout(() => { try { child.kill(); } catch { /* noop */ } }, 45000);
+    child.stdout.on('data', d => { out += d.toString(); if (out.length > 20000) out = out.slice(-10000); });
+    child.stderr.on('data', d => { errOut += d.toString(); });
+    child.on('error', err => { clearTimeout(killTimer); log('sitrep cli error:', String(err.message || err)); resolve(null); });
+    child.on('exit', (code) => {
+      clearTimeout(killTimer);
+      if (code !== 0) { log('sitrep cli exit', code, excerpt(errOut, 160)); return resolve(null); }
+      // Sanitize: strip ANSI, collapse whitespace, cap length.
+      const text = excerpt(out.replace(ANSI_RE, '').replace(/\s+/g, ' ').trim(), 500);
+      resolve(text || null);
+    });
+  });
+}
+
 /* ------------------------------ http ------------------------------ */
 
 const MIME = {
@@ -341,6 +536,14 @@ function serveStatic(req, res) {
 function json(res, code, obj) {
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify(obj));
+}
+
+// Normalize an error's `code` into a valid HTTP status. fs errors carry string
+// codes ('ENOENT'), and runCli rejections carry the process exit code (e.g. 1);
+// passing either to writeHead throws ERR_HTTP_INVALID_STATUS_CODE inside an
+// async callback → uncaughtException → dead bridge. Only honor explicit 4xx/5xx.
+function httpCode(err) {
+  return Number.isInteger(err && err.code) && err.code >= 400 && err.code <= 599 ? err.code : 400;
 }
 
 function extractToken(req) {
@@ -428,12 +631,17 @@ const server = http.createServer((req, res) => {
       let body = '';
       req.on('data', c => { body += c; if (body.length > 16 * 1024) req.destroy(); });
       req.on('end', async () => {
+        if (configWriteInFlight) {
+          return json(res, 409, { ok: false, error: 'otra operación de config en curso' });
+        }
+        configWriteInFlight = true;
         try {
           const { model, thinking } = JSON.parse(body || '{}');
           const VALID_THINKING = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'adaptive', 'max'];
           if (model && !/^[a-z0-9/._-]+$/i.test(model)) throw new Error('modelo inválido');
           if (thinking && !VALID_THINKING.includes(thinking)) throw new Error('thinking inválido');
-          const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+          const original = fs.readFileSync(cfgPath, 'utf8'); // snapshot for revert-on-invalid
+          const cfg = JSON.parse(original);
           cfg.agents = cfg.agents || {}; cfg.agents.defaults = cfg.agents.defaults || {};
           const d = cfg.agents.defaults;
           if (model) {
@@ -451,12 +659,17 @@ const server = http.createServer((req, res) => {
           }
           fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), 'utf8');
           const validate = await runCli('config validate');
-          if (!/Config valid/i.test(validate)) throw new Error('config no validó: ' + excerpt(validate, 200));
+          if (!/Config valid/i.test(validate)) {
+            try { fs.writeFileSync(cfgPath, original, 'utf8'); } catch { /* best-effort revert */ }
+            throw new Error('config no validó (revertido): ' + excerpt(validate, 200));
+          }
           const restart = await runCli('gateway restart', 90000);
           pushEvent({ type: 'sys', text: `FLOTA actualizada → modelo: ${model || 'sin cambio'} · effort: ${thinking || 'sin cambio'} · gateway reiniciado` });
           json(res, 200, { ok: true, model: model || null, thinking: thinking || null, restarted: /Restart/i.test(restart) });
         } catch (err) {
           json(res, 400, { ok: false, error: String(err.message || err) });
+        } finally {
+          configWriteInFlight = false;
         }
       });
       return;
@@ -498,6 +711,137 @@ const server = http.createServer((req, res) => {
       } catch (err) {
         json(res, 400, { ok: false, error: String(err.message || err) });
       }
+    });
+    return;
+  }
+
+  /* --- F1: projects --- */
+  if (url === '/api/projects') {
+    if (req.method === 'GET') {
+      try { return json(res, 200, { ok: true, ...listProjects() }); }
+      catch (err) { return json(res, 500, { ok: false, error: String(err.message || err) }); }
+    }
+    if (req.method === 'POST') {
+      let body = '';
+      req.on('data', c => { body += c; if (body.length > 16 * 1024) req.destroy(); });
+      req.on('end', () => {
+        try {
+          const { name } = JSON.parse(body || '{}');
+          json(res, 200, { ok: true, ...createProject(name) });
+        } catch (err) {
+          json(res, httpCode(err), { ok: false, error: String(err.message || err) });
+        }
+      });
+      return;
+    }
+  }
+
+  /* --- F2: per-agent model (read) --- */
+  if (url === '/api/agents/models' && req.method === 'GET') {
+    try {
+      const cfg = JSON.parse(fs.readFileSync(openclawCfgPath(), 'utf8'));
+      const list = Array.isArray(cfg.agents?.list) ? cfg.agents.list : [];
+      return json(res, 200, {
+        ok: true,
+        default: cfg.agents?.defaults?.model?.primary || null,
+        running: [...state.tasks.values()].filter(t => t.status === 'running' || t.status === 'queued').length,
+        agents: list.map(a => ({ id: a.id, model: (typeof a.model === 'string' && a.model) ? a.model : null })),
+      });
+    } catch (err) { return json(res, 500, { ok: false, error: String(err.message || err) }); }
+  }
+
+  /* --- F2: per-agent model (write) — prefix/regex match for /api/agents/<id>/model --- */
+  const agentModelMatch = url.match(/^\/api\/agents\/([^/]+)\/model$/);
+  if (agentModelMatch && (req.method === 'PUT' || req.method === 'POST')) {
+    // Malformed percent-encoding (e.g. /api/agents/%zz/model) makes
+    // decodeURIComponent throw URIError synchronously, crashing the handler and
+    // killing the bridge. Same guard serveStatic already has; bad <id> → 404.
+    let id;
+    try { id = decodeURIComponent(agentModelMatch[1]); }
+    catch { return json(res, 404, { ok: false, error: 'agente no encontrado' }); }
+    let body = '';
+    req.on('data', c => { body += c; if (body.length > 16 * 1024) req.destroy(); });
+    req.on('end', async () => {
+      if (configWriteInFlight) {
+        return json(res, 409, { ok: false, error: 'otra operación de config en curso' });
+      }
+      configWriteInFlight = true;
+      try {
+        const { model } = JSON.parse(body || '{}');
+        // null/undefined/'' mean "remove override"; anything else must be a string.
+        if (model !== undefined && model !== null && typeof model !== 'string') {
+          throw new Error('modelo inválido');
+        }
+        const cfgPath = openclawCfgPath();
+        const original = fs.readFileSync(cfgPath, 'utf8'); // snapshot for revert-on-invalid
+        const cfg = JSON.parse(original);
+        const list = Array.isArray(cfg.agents?.list) ? cfg.agents.list : [];
+        const entry = list.find(a => a.id === id);
+        if (!entry) throw Object.assign(new Error('agente no encontrado'), { code: 404 });
+
+        // model === '' / null → remove override (agent falls back to fleet default).
+        const remove = model === '' || model === null || model === undefined;
+        if (!remove && !/^[a-z0-9/._-]+$/i.test(model)) throw new Error('modelo inválido');
+
+        if (remove) {
+          delete entry.model;
+        } else {
+          // Same pattern as /api/fleet: register anthropic/* models with the local
+          // Claude CLI runtime so the gateway can route to them.
+          cfg.agents.defaults = cfg.agents.defaults || {};
+          const d = cfg.agents.defaults;
+          if (model.startsWith('anthropic/')) {
+            d.models = d.models || {};
+            if (!d.models[model]) d.models[model] = { agentRuntime: { id: 'claude-cli' } };
+          }
+          entry.model = model;
+        }
+
+        fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2), 'utf8');
+        const validate = await runCli('config validate');
+        if (!/Config valid/i.test(validate)) {
+          try { fs.writeFileSync(cfgPath, original, 'utf8'); } catch { /* best-effort revert */ }
+          throw new Error('config no validó (revertido): ' + excerpt(validate, 200));
+        }
+        const restart = await runCli('gateway restart', 90000);
+        pushEvent({ type: 'sys', text: `AGENTE "${id}" → modelo: ${remove ? 'heredado (default)' : model} · gateway reiniciado` });
+        json(res, 200, { ok: true, id, model: remove ? null : model, restarted: /Restart/i.test(restart) });
+      } catch (err) {
+        json(res, httpCode(err), { ok: false, error: String(err.message || err) });
+      } finally {
+        configWriteInFlight = false;
+      }
+    });
+    return;
+  }
+
+  /* --- F3: sitrep (AI narrator) --- */
+  if (url === '/api/sitrep' && req.method === 'GET') {
+    const cli = detectClaude();
+    if (!cli.ok) return json(res, 200, { ok: false, disabled: true }); // silent degradation
+    const now = Date.now();
+    const active = [...state.tasks.values()].filter(t => t.status === 'running' || t.status === 'queued');
+    const lastT = state.events.length ? state.events[state.events.length - 1].t : 0;
+    const count = state.events.length;
+    // Regenerate at most every 60s, and only when there's something to narrate:
+    // active tasks OR new ring events since the last attempt.
+    const newActivity = active.length > 0 || count !== sitrep.lastCount || lastT !== sitrep.lastT;
+    const stale = !sitrep.lastAttempt || (now - sitrep.lastAttempt) >= SITREP_MIN_MS;
+    if (sitrep.inFlight || !stale || !newActivity) {
+      return json(res, 200, { ok: true, text: sitrep.text, t: sitrep.t, model: NARRATOR_MODEL });
+    }
+    sitrep.inFlight = true;
+    sitrep.lastAttempt = now;
+    sitrep.lastCount = count;
+    sitrep.lastT = lastT;
+    generateSitrep().then(text => {
+      if (text) { sitrep.text = text; sitrep.t = Date.now(); } // keep last good on null
+      sitrep.inFlight = false;
+      json(res, 200, { ok: true, text: sitrep.text, t: sitrep.t, model: NARRATOR_MODEL });
+    }).catch(err => {
+      sitrep.inFlight = false;
+      log('sitrep error:', String((err && err.message) || err));
+      json(res, 200, { ok: true, text: sitrep.text, t: sitrep.t, model: NARRATOR_MODEL });
     });
     return;
   }

@@ -156,10 +156,15 @@ function closeModal(val) {
 async function apiFetch(url, opts = {}) {
   opts = Object.assign({}, opts);
   opts.headers = Object.assign({}, opts.headers || {});
+  // silent401: background polls (e.g. the SITREP poll) opt out of the interactive
+  // token flow — a 401 throws a tagged error instead of popping the modal, so an
+  // unattended loop can't reopen the prompt every tick.
+  const silent401 = opts.silent401; delete opts.silent401;
   const t = getToken();
   if (t) opts.headers['Authorization'] = 'Bearer ' + t;
   let r = await fetch(url, opts);
   if (r.status === 401) {
+    if (silent401) { const e = new Error('401'); e.status = 401; throw e; }
     // capture BEFORE await: the opener is the caller for whom no shared modal existed
     // yet. Concurrent 401s reuse the same modal/result — only the opener runs the
     // global side effects (toast + reconnect) so they fire exactly once.
@@ -178,10 +183,23 @@ async function apiFetch(url, opts = {}) {
     if (r.status === 401) { setToken(''); if (iOpenedModal) toast('Token rechazado — vuelve a intentarlo', 'error'); throw new Error('token rechazado'); }
     if (iOpenedModal) {
       toast('Token guardado', 'success');
-      if (ST.mode === 'live') { disconnectLive(); connectLive(); } // reconnect SSE with the new token
+      if (ST.mode === 'live') { disconnectLive(); connectLive(); reInitAfterAuth(); } // reconnect SSE + recover degraded loads
     }
   }
   return r;
+}
+
+// A token just unlocked the API after a degraded boot (or a cancelled prompt):
+// re-run the loads that silently failed without it so the UI recovers without an
+// F5, and un-pause the SITREP poll. Each loader is idempotent + self-guards, so
+// re-invoking the in-flight caller is harmless.
+function reInitAfterAuth() {
+  if (ST.mode !== 'live') return;
+  loadProjects();   // success path hides the manual-path fallback again
+  loadModels();
+  fleetLoad();
+  sitrepAuthPaused = false;
+  if (!sitrepDisabled) startSitrepPoll();
 }
 
 /* ---- toasts ---- */
@@ -221,9 +239,12 @@ function buildRoster() {
     el.innerHTML =
       '<span class="code" style="color:' + GROUPS[a.g].c + '">' + a.code + '</span>' +
       '<span class="nm">' + a.cap + '</span>' +
+      '<span class="model def" title="modelo">·</span>' +
       '<span class="sharp">·</span>' +
       '<span class="st"><b></b><span class="stx">·</span></span>';
     el.addEventListener('click', () => select(a.id));
+    // model chip: click opens the mini-picker (don't bubble into row select)
+    el.querySelector('.model').addEventListener('click', (ev) => { ev.stopPropagation(); openModelPicker(a.id, ev.currentTarget); });
     roster.appendChild(el);
     rosterEls[a.id] = el;
   });
@@ -235,7 +256,9 @@ function buildLegend() {
   let h = '';
   Object.entries(GROUPS).forEach(([k, g]) => { if (k !== 'other') h += '<div class="row"><i style="background:' + g.c + '"></i>' + g.label + '</div>'; });
   h += '<div class="sep"></div>';
-  h += '<div class="row"><i style="background:#fff;box-shadow:0 0 6px #fff"></i>trabajando</div>';
+  // working nodes light up in their OWN layer hue and pulse — no single swatch can
+  // show the per-layer color, so use the system attention accent (amber) and say so.
+  h += '<div class="row"><i style="background:var(--amber)"></i>trabajando · pulsa en el color de su capa</div>';
   h += '<div class="row"><i style="background:var(--green)"></i>listo</div>';
   h += '<div class="row"><i style="background:var(--violet)"></i>crítico revisando</div>';
   h += '<div class="row"><i style="background:transparent;border:1px dashed var(--dim);box-sizing:border-box"></i>standby</div>';
@@ -262,8 +285,8 @@ function buildGraph() {
     const cap = el('text', { class: 'cap', y: 41 }); cap.textContent = a.cap; g.appendChild(cap);
     const sb = el('text', { class: 'sharpbadge', y: 55 }); sb.textContent = ''; g.appendChild(sb);
     const badge = el('g', { class: 'badge' });
-    badge.appendChild(el('circle', { cx: 17, cy: -17, r: 7, fill: '#4ade80' }));
-    const ck = el('text', { x: 17, y: -16.5, fill: '#06220f', 'font-size': '9', 'text-anchor': 'middle', 'dominant-baseline': 'central', 'font-weight': '700' });
+    badge.appendChild(el('circle', { cx: 17, cy: -17, r: 7, fill: '#5BB8E0' }));
+    const ck = el('text', { x: 17, y: -16.5, fill: '#0A0A0B', 'font-size': '9', 'text-anchor': 'middle', 'dominant-baseline': 'central', 'font-weight': '700' });
     ck.textContent = '✓'; badge.appendChild(ck);
     g.appendChild(badge);
     g.addEventListener('click', () => select(a.id));
@@ -281,7 +304,7 @@ function buildGraph() {
   });
   const hub = el('g', { class: 'hub' });
   hub.appendChild(el('circle', { class: 'ring', r: 33 }));
-  const em = el('text', { class: 'emoji', y: -3 }); em.textContent = '🦞'; hub.appendChild(em);
+  const em = el('text', { class: 'emoji', y: 1 }); em.textContent = '✦'; hub.appendChild(em);
   const hc = el('text', { class: 'cap', y: 50 }); hc.textContent = HUBCFG.cap; hub.appendChild(hc);
   hub.addEventListener('click', () => select(HUBCFG.id));
   net.appendChild(hub);
@@ -419,7 +442,8 @@ function renderFeedEmpty() {
   const msg = s
     ? 'No hay actividad en este proyecto todavía — despacha una tarea abajo.'
     : 'Sin actividad aún — despacha una tarea desde el composer.';
-  feed.innerHTML = '<div class="feed-empty"><div class="glyph">◴</div><div class="txt">' + msg + '</div></div>';
+  const art = '   (\\/)\n   (°°)   ·····\n   /||\\   feed vacío';
+  feed.innerHTML = '<div class="feed-empty"><pre class="art">' + art + '</pre><div class="txt">' + msg + '</div></div>';
 }
 // rebuild the whole feed from the log, filtered by the active project
 function renderFeed() {
@@ -505,6 +529,10 @@ function renderAgentPanel(id) {
   let h = '';
   h += '<div class="ag-head"><div class="ag-dot" style="border-color:' + c + ';color:' + c + '">' + (a.isCritic ? 'C' : a.code) + '</div>';
   h += '<div><h3>' + (a.isCritic ? (AG[parentOf[id]]?.cap || '') + ' · Critic' : (a.cap || a.id)) + '</h3><div class="gtag" style="color:' + c + '">' + (a.isHub ? 'ORQUESTADOR' : (a.isCritic ? 'CRÍTICO SHARP' : GROUPS[a.g].label)) + '</div></div></div>';
+  if (!a.isCritic) {
+    const mi = modelChipInfo(id);
+    h += '<div class="ag-modelrow"><span class="k">MODELO</span><span class="model ' + mi.cls + '" id="agModelChip" title="' + esc('modelo: ' + mi.title) + '">' + esc(mi.txt) + '</span><span class="k">click para cambiar</span></div>';
+  }
   h += '<div class="ag-state">' + STATUS_LONG[ag.status] + '</div>';
   h += '<div class="ag-sec"><div class="k">ROL</div><div class="v muted">' + (a.desc || '—') + '</div></div>';
   h += '<div class="ag-sec"><div class="k">' + (ag.status === 'work' ? 'TRABAJANDO EN' : 'ÚLTIMA TAREA') + '</div><div class="v">' + (ag.current ? esc(ag.current) : '— todavía nada') + '</div></div>';
@@ -538,6 +566,7 @@ function renderAgentPanel(id) {
   h += '<button class="btn ag-back" id="agBack">← VOLVER AL FEED</button>';
   agentP.innerHTML = h;
   $('agBack').addEventListener('click', () => showTab('feed'));
+  const mc = $('agModelChip'); if (mc) mc.addEventListener('click', (ev) => openModelPicker(id, ev.currentTarget));
 }
 function showTab(which) {
   const tf = $('tabFeed'), ta = $('tabAgent');
@@ -552,7 +581,7 @@ function showTab(which) {
 }
 function renderAgentEmpty() {
   agentP.innerHTML = '<div class="ag-empty">'
-    + '<div class="glyph">⌖</div>'
+    + '<pre class="art">  ·  ·  ·\n ( ⌖ )\n  ·  ·  ·</pre>'
     + '<div class="tit">Ningún agente seleccionado</div>'
     + '<div class="txt">Toca un nodo del anillo, un crítico satélite o un agente del roster para ver su detalle, su último SHARP y sus mensajes.</div>'
     + '<button class="btn ag-back" id="agBack">← VOLVER AL FEED</button>'
@@ -586,31 +615,50 @@ function setStatLabels() {
     $('k3').textContent = 'TIEMPO';
   }
 }
+// slot-text counters (live only — discrete integers roll on change). In demo
+// the token counter lerps every frame, so it writes plain text and the
+// controller is reset on mode switch to avoid a stale `current`.
+function makeCounter(el) {
+  let ctrl = null;
+  return {
+    set(v) { v = String(v); if (RM) { el.textContent = v; return; } if (!ctrl) ctrl = slotText(el, v); else ctrl.set(v, { direction: 'up' }); },
+    reset(v) { ctrl = null; el.classList.remove('slot-text'); el.removeAttribute('aria-label'); el.textContent = String(v == null ? '' : v); },
+  };
+}
+const cStTk = makeCounter($('stTk')), cStMsg = makeCounter($('stMsg'));
+
+// "N/total" working count — updateStats runs every frame, so only touch the DOM
+// (and reparse the <small>) when the number actually changes.
+let _lastStAg = null;
+function setStAg(n) {
+  if (n === _lastStAg) return;
+  _lastStAg = n;
+  $('stAg').innerHTML = n + '<small>/' + ALL.length + '</small>';
+}
+
 function updateStats() {
   if (ST.mode === 'live') {
     // all counters reflect the active project filter
     const tasks = [...ST.live.tasks.values()].filter(taskVisible);
     const ok = tasks.filter(t => t.status === 'ok').length;
-    const fail = tasks.filter(t => t.status === 'fail').length;
     const running = tasks.filter(t => t.status === 'run').length;
-    $('stTk').textContent = ok;
-    $('stMsg').textContent = tasks.length;
+    cStTk.set(ok);
+    cStMsg.set(tasks.length);
     const working = ALL.filter(id => ST.agents[id]?.status === 'work').length;
-    $('stAg').innerHTML = working + '<small>/' + ALL.length + '</small>';
+    setStAg(working);
     const starts = tasks.map(t => t.start).filter(Boolean);
     const t0 = starts.length ? Math.min(...starts) : null;
     $('stTime').textContent = t0 ? fmtT((Date.now() - t0) / 1000) : '00:00';
-    const total = ok + fail + running;
-    $('progFill').style.width = total ? Math.round(((ok + fail) / total) * 100) + '%' : '0%';
+    updateBurst(tasks, running);
   } else {
     ST.shownTk += (ST.totals.tk - ST.shownTk) * 0.09;
     if (Math.abs(ST.totals.tk - ST.shownTk) < 1) ST.shownTk = ST.totals.tk;
     $('stTk').textContent = fmtTk(ST.shownTk);
     $('stMsg').textContent = ST.totals.msg;
     const act = ALL.filter(id => ['on', 'work', 'done'].includes(ST.agents[id]?.status)).length;
-    $('stAg').innerHTML = act + '<small>/' + ALL.length + '</small>';
+    setStAg(act);
     $('stTime').textContent = fmtT(ST.vt);
-    $('progFill').style.width = ST.script ? Math.min(100, ST.vt / ST.script.total * 100) + '%' : '0%';
+    const bs = $('burstStat'); if (bs) bs.hidden = true;  // burst is a live-only concept
   }
 }
 
@@ -720,7 +768,7 @@ function liveHandle(evt) {
           setSharp(target, evt.sharp);
           if (cnodeEls[evt.a]) ST.agents[evt.a].sharp = evt.sharp;
         }
-        if (evt.to) { recordMsg(evt.a, evt.to, (evt.text || '').slice(0, 120)); spawnP(evt.a, evt.to, '#4ade80'); }
+        if (evt.to) { recordMsg(evt.a, evt.to, (evt.text || '').slice(0, 120)); spawnP(evt.a, evt.to, '#5BB8E0'); }
       } else if (evt.to) {
         recordMsg(evt.a, evt.to, (evt.text || '').slice(0, 120));
       }
@@ -806,7 +854,9 @@ function connectLive() {
         setPill('offline', 'TOKEN REQUERIDO');
         disconnectLive();
         askToken('La conexión en vivo (SSE) fue rechazada. Pega un token para reconectar.').then(nt => {
-          if (nt) { setToken(nt); connectLive(); }
+          // the token may arrive HERE (SSE modal) rather than via apiFetch, so the
+          // degraded boot loads must also be retried from this path (M4).
+          if (nt) { setToken(nt); connectLive(); reInitAfterAuth(); }
           else { setPill('offline', 'SIN CONEXIÓN'); toast('Conexión en vivo cerrada — sin token', 'error'); }
         });
         return;
@@ -854,6 +904,15 @@ const compEl = $('composer'), compText = $('compText'), compDir = $('compDir'),
   compThread = $('compThread'), compNew = $('compNew'), compRecents = $('compDirRecents');
 const pendingImgs = []; // { name, dataBase64, preview }
 
+// slot-text the dispatch button label on action (Despachar → Despachando…)
+let _slCompSend = null;
+function setCompSendLabel(t) {
+  if (!compSend) return;
+  if (RM) { compSend.textContent = t; return; }
+  if (!_slCompSend) _slCompSend = slotText(compSend, t, { direction: 'up' });
+  else _slCompSend.set(t, { direction: 'up' });
+}
+
 function renderRecents() {
   if (!compRecents) return;
   compRecents.innerHTML = '';
@@ -864,11 +923,12 @@ function renderRecents() {
   });
 }
 function refreshThreadChip() {
-  if (!compThread || !compDir) return;
-  const dir = compDir.value.trim();
+  if (!compThread) return;
+  const dir = activeDir();
   if (!dir) { compThread.textContent = ''; compThread.classList.remove('live'); return; }
+  const slug = activeSlug();
   const known = loadRecents().some(p => p.dir === dir);
-  compThread.textContent = known ? 'HILO: ' + projSlug(dir) + ' · continúa donde quedó' : 'HILO NUEVO: ' + projSlug(dir);
+  compThread.textContent = known ? 'HILO: ' + slug + ' · continúa' : 'HILO NUEVO: ' + slug;
   compThread.classList.toggle('live', known);
 }
 
@@ -912,17 +972,25 @@ if (compEl) {
   });
 
   compDir.value = localStorage.getItem('stackops-projectdir') || '';
-  compDir.addEventListener('change', () => { localStorage.setItem('stackops-projectdir', compDir.value.trim()); refreshThreadChip(); });
+  // manual path fallback (only visible when /api/projects is unavailable):
+  // typing a path activates it as the project, mirroring the picker.
+  compDir.addEventListener('change', () => {
+    const v = compDir.value.trim();
+    localStorage.setItem('stackops-projectdir', v);
+    if (v) setProject(v);
+    else { ST.project = null; localStorage.setItem('stackops-activeproject', ''); renderPicker(); syncCompProject(); if (ST.mode === 'live') renderLiveView(); }
+    refreshThreadChip();
+  });
   compDir.addEventListener('input', refreshThreadChip);
   renderRecents();
   refreshThreadChip();
 
   // "↺ Nueva conv." — reset the architect thread for this project AND clear its view (bug 1)
   compNew.addEventListener('click', async () => {
-    const dir = compDir.value.trim();
-    if (!dir) { toast('Pon la carpeta del proyecto para resetear su conversación', 'info'); return; }
+    const dir = activeDir();
+    if (!dir) { toast('Elige un proyecto para resetear su conversación', 'info'); return; }
     if (!confirm('¿Resetear la conversación del architect para este proyecto?\n' + dir + '\n\n(El hook session-memory guarda un resumen antes de limpiar.)')) return;
-    const slug = projSlug(dir);
+    const slug = activeSlug();
     try {
       await sendToArchitect('/new', slug);
       // wipe this project's feed + tasks so the view starts clean
@@ -939,10 +1007,10 @@ if (compEl) {
   async function compDispatch() {
     if (ST.mode !== 'live') { toast('Cambia a modo LIVE para despachar de verdad', 'info'); return; }
     const text = compText.value.trim();
-    const dir = compDir.value.trim();
+    const dir = activeDir();
     if (!text && !pendingImgs.length) { compText.focus(); return; }
     compSend.disabled = true;
-    compSend.textContent = '… despachando';
+    setCompSendLabel('Despachando…');
     try {
       // upload images first so file-reading runtimes can open them
       const savedPaths = [];
@@ -962,9 +1030,9 @@ if (compEl) {
         message += '\n\nIMÁGENES ADJUNTAS (léelas desde disco antes de empezar):\n' + savedPaths.map(p => '- ' + p).join('\n');
       }
       // Per-project session: each project folder gets its own persistent architect thread.
-      const sessionKey = dir ? projSlug(dir) : undefined;
+      const sessionKey = activeSlug() || undefined;
       await sendToArchitect(message, sessionKey);
-      if (dir) { saveRecentDir(dir); renderRecents(); setProject(dir); } // add + activate the project
+      if (dir && (!ST.project || ST.project.dir !== dir)) { saveRecentDir(dir); renderRecents(); setProject(dir); } // add + activate the project
       refreshThreadChip();
       compText.value = '';
       pendingImgs.length = 0;
@@ -976,7 +1044,7 @@ if (compEl) {
       toast('No se pudo despachar: ' + e.message, 'error');
     } finally {
       compSend.disabled = false;
-      compSend.textContent = '▶ Despachar al ARCHITECT';
+      setCompSendLabel('▶ Despachar al ARCHITECT');
     }
   }
   compSend.addEventListener('click', compDispatch);
@@ -986,40 +1054,417 @@ if (compEl) {
 }
 
 /* ============================================================
-   PROJECT SELECTOR (header) — synced with the composer folder
+   PROJECT PICKER (header) — custom dropdown (no native <select>).
+   Source of truth: GET /api/projects when available, else recents.
+   The path is shown (muted) but never typed; manual path input is a
+   degradation fallback only when the projects endpoint fails.
    ============================================================ */
-function renderProjectSelector() {
-  const sel = $('projectSel');
-  if (!sel) return;
-  const recents = loadRecents();
-  const cur = ST.project ? ST.project.dir : '__global__';
-  sel.innerHTML = '';
-  const g = document.createElement('option');
-  g.value = '__global__'; g.textContent = '◎ GLOBAL · todo';
-  sel.appendChild(g);
-  recents.forEach(p => {
-    const o = document.createElement('option');
-    o.value = p.dir;
-    const base = p.dir.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p.dir;
-    o.textContent = '▪ ' + base;
-    o.title = p.dir + ' · ' + projSlug(p.dir);
-    sel.appendChild(o);
-  });
-  sel.value = (cur === '__global__' || recents.some(p => p.dir === cur)) ? cur : '__global__';
+const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,49}$/;  // mirror the bridge's validation
+let projectsApi = null;      // [{name,dir,slug,hasAgentsMd,isGit,hasThread}] | null
+let projectsRoot = null;
+let apiProjectsOk = false;   // false → manual-path fallback
+
+const baseName = d => String(d || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || String(d || '');
+function findProject(dir) {
+  if (projectsApi) { const p = projectsApi.find(x => x.dir === dir); if (p) return p; }
+  const r = loadRecents().find(p => p.dir === dir);
+  return r ? { name: baseName(dir), dir, slug: projSlug(dir) } : null;
 }
+
+// the active dir/slug come from the picker (ST.project), with the manual
+// fallback input only consulted when the projects endpoint is unavailable.
+function activeDir() {
+  if (ST.project) return ST.project.dir;
+  return (compDir && !compDir.hidden) ? compDir.value.trim() : '';
+}
+function activeSlug() {
+  if (ST.project) return ST.project.slug;
+  const d = activeDir();
+  return d ? projSlug(d) : null;
+}
+
 // switch the active project (or GLOBAL); syncs composer + re-renders the live view
 function setProject(dirOrGlobal) {
   if (!dirOrGlobal || dirOrGlobal === '__global__') {
     ST.project = null;
     localStorage.setItem('stackops-activeproject', '');
   } else {
-    ST.project = { dir: dirOrGlobal, slug: projSlug(dirOrGlobal) };
+    const p = findProject(dirOrGlobal);
+    ST.project = { dir: dirOrGlobal, slug: p ? p.slug : projSlug(dirOrGlobal), name: p ? p.name : baseName(dirOrGlobal) };
     localStorage.setItem('stackops-activeproject', dirOrGlobal);
+    saveRecentDir(dirOrGlobal); renderRecents();
     if (compDir) { compDir.value = dirOrGlobal; localStorage.setItem('stackops-projectdir', dirOrGlobal); }
   }
-  renderProjectSelector();
+  renderPicker();
+  syncCompProject();
   refreshThreadChip();
   if (ST.mode === 'live') renderLiveView();
+}
+
+function syncCompProject() {
+  const nm = $('cpName'), pa = $('cpPath');
+  if (!nm || !pa) return;
+  if (ST.project) { nm.textContent = ST.project.name || baseName(ST.project.dir); pa.textContent = ST.project.dir; }
+  else { nm.textContent = 'GLOBAL'; pa.textContent = ''; }
+}
+
+function renderPicker() {
+  const nm = $('pkName'), pa = $('pkPath');
+  if (nm) nm.textContent = ST.project ? (ST.project.name || baseName(ST.project.dir)) : 'GLOBAL';
+  if (pa) pa.textContent = ST.project ? ST.project.dir : '';
+  const nb = $('projectNew'); if (nb) nb.hidden = !apiProjectsOk;
+  renderPickerList();
+}
+function pickerItem(p) {
+  const d = document.createElement('div');
+  d.className = 'picker-item' + (p.sel ? ' sel' : '');
+  d.setAttribute('role', 'option');
+  let badges = '';
+  if (p.hasAgentsMd) badges += '<span class="pi-badge agents" title="AGENTS.md">AG ✓</span>';
+  if (p.isGit) badges += '<span class="pi-badge git" title="repo git">git</span>';
+  if (p.hasThread) badges += '<span class="pi-badge thread" title="hilo del architect existente">hilo</span>';
+  if (p.legacy) badges += '<span class="pi-badge legacy" title="reciente fuera del root de proyectos">legacy</span>';
+  d.innerHTML =
+    '<span class="pi-glyph">' + (p.global ? '◎' : '▪') + '</span>' +
+    '<span class="pi-main"><span class="pi-name">' + esc(p.name) + '</span>' +
+    (p.dir && p.dir !== '__global__' ? '<span class="pi-path">' + esc(p.dir) + '</span>' : '') + '</span>' +
+    '<span class="pi-badges">' + badges + '</span>';
+  d.addEventListener('click', () => { closePicker(); setProject(p.dir); });
+  return d;
+}
+function renderPickerList(filter) {
+  const list = $('projectList'); if (!list) return;
+  const q = (filter != null ? filter : ($('projectSearch') ? $('projectSearch').value : '')).toLowerCase();
+  list.innerHTML = '';
+  list.appendChild(pickerItem({ name: 'GLOBAL · todo', dir: '__global__', global: true, sel: !ST.project }));
+  const matches = p => !q || (p.name || '').toLowerCase().includes(q) || (p.dir || '').toLowerCase().includes(q);
+  const src = (apiProjectsOk && projectsApi)
+    ? projectsApi.slice()
+    : loadRecents().map(p => ({ name: baseName(p.dir), dir: p.dir, slug: projSlug(p.dir) }));
+  const filtered = src.filter(matches);
+  filtered.forEach(p => list.appendChild(pickerItem(Object.assign({}, p, { sel: ST.project && ST.project.dir === p.dir }))));
+  // OTROS / legacy: recents whose dir isn't in the authoritative list (e.g. outside
+  // PROJECTS_ROOT). With the manual-path input hidden, these would otherwise be
+  // unreachable — surface them as a muted, still-selectable section (local slug).
+  let legacy = [];
+  if (apiProjectsOk && projectsApi) {
+    const apiDirs = new Set(projectsApi.map(p => p.dir));
+    legacy = loadRecents()
+      .filter(p => !apiDirs.has(p.dir))
+      .map(p => ({ name: baseName(p.dir), dir: p.dir, slug: projSlug(p.dir), legacy: true }))
+      .filter(matches);
+    if (legacy.length) {
+      const sec = document.createElement('div');
+      sec.className = 'picker-section';
+      sec.textContent = 'OTROS · legacy (fuera del root)';
+      list.appendChild(sec);
+      legacy.forEach(p => list.appendChild(pickerItem(Object.assign({}, p, { sel: ST.project && ST.project.dir === p.dir }))));
+    }
+  }
+  if (!filtered.length && !legacy.length) {
+    const e = document.createElement('div');
+    e.className = 'picker-empty';
+    e.textContent = q ? 'nada coincide con la búsqueda' : (apiProjectsOk ? 'sin proyectos\n+ crea uno abajo' : (loadRecents().length ? 'nada coincide' : 'sin proyectos recientes'));
+    list.appendChild(e);
+  }
+}
+let _pickKbd = -1;
+function openPicker(asSheet) {
+  const pk = $('projectPicker'), pop = $('projectPop'); if (!pk || !pop) return;
+  // On small screens the header anchor can be off-viewport (e.g. opened from the
+  // composer's "cambiar"), so render the pop as a centered fixed sheet instead.
+  pk.classList.toggle('as-sheet', !!asSheet);
+  pk.dataset.open = '1'; pop.hidden = false;
+  $('projectBtn').setAttribute('aria-expanded', 'true');
+  const s = $('projectSearch'); if (s) s.value = '';
+  _pickKbd = -1;
+  renderPickerList('');
+  setTimeout(() => { if (s) s.focus(); }, 20);
+  document.addEventListener('mousedown', _pickDoc, true);
+  document.addEventListener('keydown', _pickKey, true);
+}
+function closePicker() {
+  const pk = $('projectPicker'), pop = $('projectPop');
+  if (!pop || pop.hidden) return;
+  pk.dataset.open = '0'; pop.hidden = true;
+  pk.classList.remove('as-sheet');
+  $('projectBtn').setAttribute('aria-expanded', 'false');
+  hideNewForm();
+  document.removeEventListener('mousedown', _pickDoc, true);
+  document.removeEventListener('keydown', _pickKey, true);
+}
+function _pickDoc(e) { const pk = $('projectPicker'); if (pk && !pk.contains(e.target)) closePicker(); }
+function _pickKey(e) {
+  // the "+ nuevo proyecto" form owns its own keys (Enter → submit). The global
+  // capture handler must not act while focus is inside it, or Enter would click
+  // the highlighted list item instead of creating the project.
+  if (e.target && e.target.closest && e.target.closest('.picker-newform')) return;
+  if (e.key === 'Escape') { e.preventDefault(); closePicker(); const b = $('projectBtn'); if (b) b.focus(); return; }
+  const items = [...$('projectList').querySelectorAll('.picker-item')];
+  if (!items.length) return;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    e.preventDefault();
+    items.forEach(i => i.classList.remove('kbd'));
+    _pickKbd = e.key === 'ArrowDown' ? Math.min(items.length - 1, _pickKbd + 1) : Math.max(0, _pickKbd - 1);
+    items[_pickKbd].classList.add('kbd'); items[_pickKbd].scrollIntoView({ block: 'nearest' });
+  } else if (e.key === 'Enter' && _pickKbd >= 0 && items[_pickKbd]) {
+    e.preventDefault(); items[_pickKbd].click();
+  }
+}
+// "+ nuevo proyecto" — inline form, client-validates, POSTs, selects on create
+function showNewForm() {
+  if ($('pkNewForm') || !apiProjectsOk) return;
+  const nb = $('projectNew'); if (nb) nb.hidden = true;
+  const f = document.createElement('div');
+  f.className = 'picker-newform'; f.id = 'pkNewForm';
+  f.innerHTML =
+    '<input id="pkNewName" placeholder="nombre del proyecto" autocomplete="off" maxlength="50">' +
+    '<div class="err" id="pkNewErr"></div>' +
+    '<div class="row"><button class="btn" id="pkNewCancel" type="button">Cancelar</button>' +
+    '<button class="btn primary" id="pkNewOk" type="button">Crear</button></div>';
+  $('projectPop').appendChild(f);
+  const inp = $('pkNewName');
+  setTimeout(() => inp.focus(), 20);
+  $('pkNewCancel').addEventListener('click', hideNewForm);
+  $('pkNewOk').addEventListener('click', submitNew);
+  inp.addEventListener('input', () => { $('pkNewErr').textContent = ''; });
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); submitNew(); } });
+}
+function hideNewForm() { const f = $('pkNewForm'); if (f) f.remove(); const nb = $('projectNew'); if (nb && apiProjectsOk) nb.hidden = false; }
+async function submitNew() {
+  const inp = $('pkNewName'), err = $('pkNewErr'); if (!inp) return;
+  const name = inp.value.trim();
+  // mirror the bridge's validation exactly (server rejects the same set, see
+  // PROJECT_NAME_RE + no '..' + no trailing '.'/' ' — Windows strips those).
+  if (!NAME_RE.test(name) || name.includes('..') || /[. ]$/.test(name)) {
+    err.textContent = 'Inválido: empieza con letra/número; sin «..»; no termina en punto ni espacio (letras·números·espacio·. _ -, máx 50).';
+    return;
+  }
+  const ok = $('pkNewOk'); if (ok) ok.disabled = true;
+  try {
+    const r = await apiFetch('/api/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || 'no se pudo crear');
+    await loadProjects();          // refresh list so the new project carries its badges
+    closePicker();
+    setProject(d.dir);
+    toast('Proyecto creado · ' + d.name, 'success');
+  } catch (e) { if (err) err.textContent = e.message; }
+  finally { if (ok) ok.disabled = false; }
+}
+
+async function loadProjects() {
+  try {
+    const r = await apiFetch('/api/projects');
+    const d = await r.json();
+    if (!d || !d.ok || !Array.isArray(d.projects)) throw new Error('sin projects');
+    projectsApi = d.projects; projectsRoot = d.root || null; apiProjectsOk = true;
+    if (compDir) compDir.hidden = true;     // picker is authoritative
+    // reconcile the active project's slug/name with the authoritative list
+    if (ST.project) { const p = projectsApi.find(x => x.dir === ST.project.dir); if (p) { ST.project.slug = p.slug; ST.project.name = p.name; } }
+    renderPicker();
+    syncCompProject();
+  } catch (e) {
+    // degradation: endpoint missing/old bridge → manual path input + recents picker
+    apiProjectsOk = false; projectsApi = null;
+    if (compDir) compDir.hidden = false;
+    renderPicker();
+  }
+}
+
+/* ============================================================
+   PER-AGENT MODEL (chips + mini-picker)
+   GET /api/agents/models · PUT /api/agents/<id>/model
+   ============================================================ */
+let agentModels = {};   // id -> model | null (override)
+let modelsDefault = null;
+let modelsRunning = 0;
+let modelsOk = false;
+
+function abbrevModel(m) {
+  if (!m) return null;
+  const s = String(m).split('/').pop();
+  if (/opus-4-8/.test(s)) return 'O4.8';
+  if (/opus-4-7/.test(s)) return 'O4.7';
+  if (/opus/.test(s)) return 'O';
+  if (/fable-5/.test(s)) return 'F5';
+  if (/fable/.test(s)) return 'F';
+  if (/sonnet-4-6/.test(s)) return 'S4.6';
+  if (/sonnet/.test(s)) return 'S';
+  if (/haiku/i.test(s)) { const v = s.match(/haiku-(\d+)[-.](\d+)/i); return v ? 'H' + v[1] + '.' + v[2] : 'H'; }
+  // generic: first letter + version
+  const letter = (s[0] || '?').toUpperCase();
+  const ver = (s.match(/(\d+)[-.](\d+)/) || []);
+  return letter + (ver.length ? ver[1] + '.' + ver[2] : '');
+}
+function modelChipInfo(id) {
+  const ov = agentModels[id];
+  if (ov) return { txt: abbrevModel(ov) || '?', cls: 'over', title: 'override: ' + ov };
+  return { txt: modelsDefault ? abbrevModel(modelsDefault) : '·', cls: 'def', title: 'default' + (modelsDefault ? ' · ' + modelsDefault : '') };
+}
+function updateModelChips() {
+  Object.keys(rosterEls).forEach(id => {
+    const chip = rosterEls[id].querySelector('.model'); if (!chip) return;
+    const m = modelChipInfo(id);
+    chip.textContent = m.txt; chip.className = 'model ' + m.cls; chip.title = 'modelo: ' + m.title;
+  });
+  if (ST.selected) renderAgentPanel(ST.selected);
+}
+async function loadModels() {
+  try {
+    const r = await apiFetch('/api/agents/models');
+    const d = await r.json();
+    if (!d || !d.ok) throw new Error('sin models');
+    modelsDefault = d.default || null; modelsRunning = d.running || 0; agentModels = {};
+    (d.agents || []).forEach(a => { agentModels[a.id] = a.model || null; });
+    modelsOk = true;
+    updateModelChips();
+  } catch (e) { modelsOk = false; /* leave chips as default '·' */ updateModelChips(); }
+}
+function fleetModelOptions() {
+  return fleetModel ? [...fleetModel.options].map(o => ({ value: o.value, label: o.textContent.replace(/\s*⚠.*/, '') })) : [];
+}
+function closeModelPicker() { const p = $('modelPop'); if (p) p.remove(); document.removeEventListener('mousedown', _modelDoc, true); }
+function _modelDoc(e) { const p = $('modelPop'); if (p && !p.contains(e.target)) closeModelPicker(); }
+function openModelPicker(id, anchor) {
+  closeModelPicker();
+  const pop = document.createElement('div');
+  pop.className = 'modelpop'; pop.id = 'modelPop';
+  let h = '<div class="mh">MODELO · ' + esc(AG[id] ? AG[id].code : id) + '</div>';
+  h += '<button data-v="" class="' + (!agentModels[id] ? 'cur' : '') + '">default<span class="ab">' + (modelsDefault ? esc(abbrevModel(modelsDefault)) : '—') + '</span></button>';
+  fleetModelOptions().forEach(o => {
+    h += '<button data-v="' + esc(o.value) + '" class="' + (agentModels[id] === o.value ? 'cur' : '') + '">' +
+      esc(o.label) + '<span class="ab">' + esc(abbrevModel(o.value) || '') + '</span></button>';
+  });
+  pop.innerHTML = h;
+  document.body.appendChild(pop);
+  const r = anchor.getBoundingClientRect();
+  pop.style.top = Math.min(r.bottom + 6, window.innerHeight - 10 - pop.offsetHeight) + 'px';
+  pop.style.left = Math.max(8, Math.min(r.left, window.innerWidth - 218)) + 'px';
+  pop.querySelectorAll('button').forEach(b => b.addEventListener('click', () => applyModel(id, b.getAttribute('data-v'))));
+  setTimeout(() => document.addEventListener('mousedown', _modelDoc, true), 0);
+}
+async function applyModel(id, model) {
+  closeModelPicker();
+  const cur = agentModels[id] || '';
+  if ((model || '') === cur) return;   // no change
+  // confirm — surface the live running count (restart kills nothing silently)
+  try { const r = await apiFetch('/api/agents/models'); const d = await r.json(); if (d && d.ok) modelsRunning = d.running || 0; } catch (e) { /* keep last */ }
+  let warn = 'Modelo de ' + (AG[id] ? AG[id].cap : id) + ' →\n  ' + (model ? model.split('/').pop() : 'default (quitar override)') + '\n\n';
+  warn += modelsRunning > 0
+    ? '⚠ Hay ' + modelsRunning + ' tarea(s) corriendo; aplicar REINICIA el gateway (las puede matar).'
+    : 'Aplicar reinicia el gateway.';
+  if (!confirm(warn)) return;
+  try {
+    const r = await apiFetch('/api/agents/' + encodeURIComponent(id) + '/model', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: model || '' }),
+    });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || '?');
+    agentModels[id] = d.model || null;
+    updateModelChips();
+    const lbl = d.model ? d.model.split('/').pop() : 'default';
+    feedLine('sys', '<span class="tag">[MODELO]</span> ' + esc(AG[id] ? AG[id].code : id) + ' → ' + esc(lbl) + (d.restarted ? ' · gateway reiniciado' : ''), undefined, { global: true });
+    toast('Modelo de ' + (AG[id] ? AG[id].code : id) + ' → ' + lbl, 'success');
+  } catch (e) { toast('No se pudo cambiar el modelo: ' + e.message, 'error'); }
+}
+
+/* ============================================================
+   SITREP strip (/SITREP) — narrator poll, visible-tab only
+   ============================================================ */
+let sitrepTimer = null, sitrepTick = null, sitrepDisabled = false;
+let sitrepAuthPaused = false;   // true after a background 401 — poll waits for a token
+let sitrepLast = { text: null, t: null, model: null };
+function relTime(t) {
+  if (!t) return '';
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  if (s < 60) return 'hace ' + s + 's';
+  if (s < 3600) return 'hace ' + Math.round(s / 60) + 'm';
+  return 'hace ' + Math.round(s / 3600) + 'h';
+}
+function renderSitrep() {
+  const el = $('sitrepText'), tEl = $('sitrepTime');
+  if (!el) return;
+  const txt = sitrepLast.text ? sitrepLast.text : 'esperando actividad…';
+  el.classList.toggle('muted', !sitrepLast.text);
+  // gentle fade swap (sparse motion; the text can be long → fade beats per-char roll)
+  if (RM) { el.textContent = txt; }
+  else { el.style.transition = 'opacity .16s'; el.style.opacity = '0'; setTimeout(() => { el.textContent = txt; el.style.opacity = '1'; }, 150); }
+  if (tEl) tEl.textContent = relTime(sitrepLast.t);
+}
+async function fetchSitrep() {
+  if (ST.mode !== 'live') return;
+  try {
+    // silent401: never pop the token modal from this background poll
+    const r = await apiFetch('/api/sitrep', { silent401: true });
+    const d = await r.json();
+    if (d && d.ok === false && d.disabled) { sitrepDisabled = true; const s = $('sitrep'); if (s) s.hidden = true; stopSitrepPoll(); return; }
+    if (!d || !d.ok) { const s = $('sitrep'); if (s) s.hidden = true; return; }
+    sitrepDisabled = false; sitrepAuthPaused = false;
+    const s = $('sitrep'); if (s) s.hidden = false;
+    sitrepLast = { text: d.text || null, t: d.t || null, model: d.model || null };
+    renderSitrep();
+  } catch (e) {
+    if (e && e.status === 401) {
+      // bridge wants auth and we have no valid token: pause (don't prompt). The
+      // poll re-engages once an interactive flow elsewhere stores a token —
+      // reInitAfterAuth(), or visibilitychange/startSitrepPoll seeing getToken().
+      sitrepAuthPaused = true;
+      const s = $('sitrep'); if (s) s.hidden = true;
+      return;
+    }
+    // endpoint missing/old bridge: hide the strip but keep polling so it appears
+    // if the bridge later ships it (no permanent stop unless explicitly disabled).
+    const s = $('sitrep'); if (s) s.hidden = true;
+  }
+}
+function startSitrepPoll() {
+  if (sitrepDisabled || ST.mode !== 'live') return;
+  if (!(sitrepAuthPaused && !getToken())) fetchSitrep();   // skip the kick while paused w/o a token
+  if (!sitrepTimer) sitrepTimer = setInterval(() => {
+    if (document.visibilityState !== 'visible') return;
+    if (sitrepAuthPaused && !getToken()) return;            // paused & still no token → don't hammer
+    fetchSitrep();
+  }, 50000);
+  if (!sitrepTick) sitrepTick = setInterval(() => { const tEl = $('sitrepTime'); if (tEl && sitrepLast.t) tEl.textContent = relTime(sitrepLast.t); }, 15000);
+}
+function stopSitrepPoll() {
+  if (sitrepTimer) { clearInterval(sitrepTimer); sitrepTimer = null; }
+  if (sitrepTick) { clearInterval(sitrepTick); sitrepTick = null; }
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && ST.mode === 'live' && !sitrepDisabled) startSitrepPoll();
+  else stopSitrepPoll();
+});
+
+/* ============================================================
+   HONEST BURST METRIC — "N hechas · M en vuelo" since last idle.
+   No invented percentages; hidden when there's no activity at all.
+   ============================================================ */
+let _lastBurstHtml = null;
+function updateBurst(tasks, running) {
+  const stat = $('burstStat'), v = $('burstV');
+  if (!stat || !v) return;
+  const L = ST.live;
+  // burst window is PER-PROJECT (keyed by slug; GLOBAL → '__global__') so switching
+  // projects doesn't reset another view's window. `tasks`/`running` are already
+  // filtered to the active slug, so idle is evaluated over this slug's tasks.
+  if (!L.bursts) L.bursts = {};
+  const key = curSlug() || '__global__';
+  if (!L.bursts[key]) L.bursts[key] = { start: null, closed: true };
+  const b = L.bursts[key];
+  if (running > 0 && b.closed) { b.start = Date.now(); b.closed = false; }   // new burst opens
+  if (running === 0 && !b.closed) { b.closed = true; }                       // burst closes at idle
+  if (b.start == null) { stat.hidden = true; return; }
+  const done = tasks.filter(t => t.status === 'ok' && (t.end || 0) >= b.start).length;
+  const fail = tasks.filter(t => t.status === 'fail' && (t.end || 0) >= b.start).length;
+  if (running === 0 && done === 0 && fail === 0) { stat.hidden = true; return; }
+  stat.hidden = false;
+  stat.classList.toggle('closed', b.closed);
+  let html = '<span>' + done + ' hechas</span>';
+  if (running > 0) html += ' · <span class="inflight">' + running + ' en vuelo</span>';
+  if (fail > 0) html += ' · <span class="fails">✗' + fail + '</span>';
+  if (html !== _lastBurstHtml) { v.innerHTML = html; _lastBurstHtml = html; }  // skip per-frame reparse
 }
 
 /* ============================================================
@@ -1236,14 +1681,14 @@ function demoHandle(e) {
     case 'cwork':
       setStatus(e.a, 'work');
       ST.agents[e.a].current = 'Revisando la arquitectura de ' + (AG[e.parent]?.cap || e.parent);
-      spawnP(e.parent, e.a, '#b07aff');
+      spawnP(e.parent, e.a, '#E6D6B0');
       feedLine('critic', tag(e.a) + 'revisando contra la rúbrica SHARP…');
       break;
     case 'cdone':
       setStatus(e.a, 'done');
       ST.agents[e.a].sharp = e.sharp;
       setSharp(e.parent, e.sharp);
-      spawnP(e.a, e.parent, '#4ade80');
+      spawnP(e.a, e.parent, '#5BB8E0');
       feedLine('done critic', tag(e.a) + 'veredicto' + sharpHtml(e.sharp));
       break;
     case 'sum': feedLine('sum', e.text); break;
@@ -1321,7 +1766,13 @@ function demoFinish() {
 /* ============================================================
    MODE SWITCHING
    ============================================================ */
-function setPill(st, txt) { pill.dataset.st = st; pillTxt.textContent = txt; }
+let _slPill = null;
+function setPill(st, txt) {
+  pill.dataset.st = st;
+  if (RM) { pillTxt.textContent = txt; return; }
+  if (!_slPill) _slPill = slotText(pillTxt, txt, { direction: 'up' });
+  else _slPill.set(txt, { direction: 'up' });
+}
 
 function setMode(mode) {
   if (ST.mode === mode) return;
@@ -1345,7 +1796,8 @@ function setMode(mode) {
   if (runBtn) runBtn.textContent = live ? '▶ Despachar' : '▶ Ejecutar';
 
   if (!live) ST.project = null; // demo has no per-project sessions
-  renderProjectSelector();
+  renderPicker();
+  syncCompProject();
 
   ST.agents = freshAgents();
   Object.keys(AG).forEach(id => setStatus(id, 'idle'));
@@ -1354,7 +1806,8 @@ function setMode(mode) {
   feed.innerHTML = '';
   particles = [];
   ST.script = null; ST.running = false; ST.finished = false;
-  ST.live.tasks = new Map(); ST.live.spawns = 0; ST.live.ok = 0; ST.live.fail = 0; ST.live.t0 = null;
+  ST.live.tasks = new Map(); ST.live.spawns = 0; ST.live.ok = 0; ST.live.fail = 0; ST.live.t0 = null; ST.live.bursts = null;
+  cStTk.reset(0); cStMsg.reset(0);
   setStatLabels();
   if (live) {
     setPill('live', 'CONECTANDO');
@@ -1364,8 +1817,11 @@ function setMode(mode) {
     if (pauseBtn) pauseBtn.disabled = true;
     if (resetBtn) resetBtn.disabled = true;
     connectLive();
+    startSitrepPoll();
   } else {
     disconnectLive();
+    stopSitrepPoll();
+    const sr = $('sitrep'); if (sr) sr.hidden = true;
     setPill('idle', 'EN ESPERA');
     $('footStatus').textContent = 'modo demo · simulador guionado';
     loadScript(expandScenario(SCENARIOS[0]));
@@ -1379,10 +1835,16 @@ function setMode(mode) {
    ============================================================ */
 const fleetEl = $('fleet'), fleetModel = $('fleetModel'), fleetThinking = $('fleetThinking'), fleetApply = $('fleetApply');
 let fleetCurrent = { model: null, thinking: null };
+let _slFleet = null;
+function setFleetLabel(t) {
+  if (RM) { fleetApply.textContent = t; return; }
+  if (!_slFleet) _slFleet = slotText(fleetApply, t, { direction: 'up' });
+  else _slFleet.set(t, { direction: 'up' });
+}
 function fleetMarkDirty() {
   const dirty = fleetModel.value !== fleetCurrent.model || fleetThinking.value !== fleetCurrent.thinking;
   fleetEl.classList.toggle('dirty', dirty);
-  fleetApply.textContent = dirty ? 'Aplicar ●' : 'Aplicar';
+  setFleetLabel(dirty ? 'Aplicar ●' : 'Aplicar');
 }
 async function fleetLoad() {
   try {
@@ -1411,7 +1873,7 @@ fleetApply.addEventListener('click', async () => {
   } catch { /* noop */ }
   if (model.includes('fable')) warn += '\n\n⚠ Fable 5: experimental en OpenClaw 2026.6.1 — verifica el primer run.';
   if (!confirm(warn)) return;
-  fleetApply.disabled = true; fleetApply.textContent = '… aplicando';
+  fleetApply.disabled = true; setFleetLabel('Aplicando…');
   try {
     const r = await apiFetch('/api/fleet', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1420,6 +1882,7 @@ fleetApply.addEventListener('click', async () => {
     const out = await r.json();
     if (!out.ok) throw new Error(out.error || '?');
     fleetCurrent = { model, thinking };
+    loadModels();   // fleet change moves the default → refresh roster chips + agent panel
     feedLine('sys', '<span class="tag">[FLOTA]</span> ✅ ' + model.split('/').pop() + ' · effort ' + thinking + ' · gateway reiniciado', undefined, { global: true });
     toast('Flota → ' + model.split('/').pop() + ' · effort ' + thinking, 'success');
   } catch (e) {
@@ -1548,12 +2011,28 @@ layout();
 setStatLabels();
 requestAnimationFrame(loop);
 
-// project selector + token modal wiring
-renderProjectSelector();
-$('projectSel')?.addEventListener('change', e => setProject(e.target.value));
+// project picker + token modal wiring
+renderPicker();
+syncCompProject();
+$('projectBtn')?.addEventListener('click', () => { const pop = $('projectPop'); (pop && pop.hidden) ? openPicker() : closePicker(); });
+$('projectSearch')?.addEventListener('input', () => { _pickKbd = -1; renderPickerList(); });
+$('projectNew')?.addEventListener('click', showNewForm);
+$('cpChange')?.addEventListener('click', () => openPicker(isMobile()));
+$('sitrepRefresh')?.addEventListener('click', fetchSitrep);
 $('modalOk')?.addEventListener('click', () => closeModal($('modalInput').value.trim()));
 $('modalCancel')?.addEventListener('click', () => closeModal(null));
 $('modalInput')?.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); closeModal($('modalInput').value.trim()); } });
+
+// header brace-word rotation — slot-text. Held static under reduced motion.
+(function brandRotation() {
+  const el = $('brandWord');
+  if (!el) return;
+  const words = ['orquestando', 'vigilando', 'despachando', 'sincronizando', 'revisando', 'ops'];
+  if (RM) { el.textContent = 'ops'; return; }
+  const ctrl = slotText(el, 'ops', { direction: 'down', color: 'var(--cyan)' });
+  let i = 0;
+  setInterval(() => { i = (i + 1) % words.length; ctrl.set(words[i], { color: 'var(--cyan)' }); }, 2800);
+})();
 
 // collapse the radial map by default on phones (feed-first)
 if (isMobile()) setGraphCollapsed(true);
@@ -1569,12 +2048,13 @@ if (isMobile()) setGraphCollapsed(true);
   // reason. Reset to GLOBAL and clear the stale persistence so view + filter agree.
   const savedProj = localStorage.getItem('stackops-activeproject') || '';
   if (savedProj && loadRecents().some(p => p.dir === savedProj)) {
-    ST.project = { dir: savedProj, slug: projSlug(savedProj) };
+    ST.project = { dir: savedProj, slug: projSlug(savedProj), name: baseName(savedProj) };
   } else {
     ST.project = null;
     if (savedProj) localStorage.setItem('stackops-activeproject', '');
   }
-  renderProjectSelector();
+  renderPicker();
+  syncCompProject();
 
   try {
     const r = await apiFetch('/api/state', { signal: AbortSignal.timeout(4000) });
@@ -1582,11 +2062,15 @@ if (isMobile()) setGraphCollapsed(true);
     await r.json();
     setMode('live');
     fleetLoad();
+    loadProjects();   // populates the picker (falls back to recents on failure)
+    loadModels();     // populates the per-agent model chips
     $('footStatus').textContent = 'bridge ok · ' + location.host;
   } catch (e) {
     // stay in LIVE even if the bridge is down (the SSE layer keeps retrying)
     setMode('live');
     fleetLoad();
+    loadProjects();
+    loadModels();
     $('footStatus').textContent = 'sin bridge · ' + location.host;
     hint.textContent = 'No hay bridge — corre "node server.js" para datos reales';
   }

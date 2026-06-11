@@ -6,7 +6,7 @@
 <title>OpenClaw · Stack Ops</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -15,9 +15,11 @@
   <!-- command bar -->
   <header class="bar">
     <div class="brand">
-      <div class="claw">🦞</div>
-      <div>
-        <h1>OPEN<em>CLAW</em> STACK OPS</h1>
+      <pre class="claw" aria-hidden="true">(\/)
+(°°)
+/||\</pre>
+      <div class="brandtxt">
+        <h1>STACK <span class="braces">{<span id="brandWord">ops</span>}</span></h1>
         <div class="sub">ORQUESTADOR · ESPECIALISTAS · CRÍTICOS</div>
       </div>
     </div>
@@ -25,12 +27,13 @@
     <div class="pill" id="pill" data-st="idle"><span class="dot"></span><span id="pillTxt">EN ESPERA</span></div>
 
     <!-- fleet model + effort (live only) -->
-    <div class="fleet" id="fleet" title="Modelo + effort de TODA la flota (28 agentes)">
+    <div class="fleet" id="fleet" title="Modelo + effort de TODA la flota">
       <span class="flbl">FLOTA</span>
       <select id="fleetModel" aria-label="Modelo de la flota">
         <option value="anthropic/claude-opus-4-8">Opus 4.8</option>
         <option value="anthropic/claude-sonnet-4-6">Sonnet 4.6</option>
         <option value="anthropic/claude-opus-4-7">Opus 4.7</option>
+        <option value="anthropic/claude-haiku-4-5-20251001">Haiku 4.5</option>
         <option value="anthropic/claude-fable-5">Fable 5 ⚠</option>
       </select>
       <select id="fleetThinking" aria-label="Effort de la flota">
@@ -44,10 +47,21 @@
       <button class="btn" id="fleetApply">Aplicar</button>
     </div>
 
-    <!-- project selector (live only) — filters feed / graph / stats -->
+    <!-- project picker (live only) — custom dropdown, filters feed / graph / stats -->
     <div class="project" id="projectWrap" title="Proyecto activo — filtra el feed, el grafo y las stats por su hilo de sesión">
       <span class="plbl">PROYECTO</span>
-      <select id="projectSel" aria-label="Proyecto activo"></select>
+      <div class="picker" id="projectPicker" data-open="0">
+        <button class="picker-btn" id="projectBtn" aria-haspopup="listbox" aria-expanded="false">
+          <span class="pk-name" id="pkName">GLOBAL</span>
+          <span class="pk-path" id="pkPath"></span>
+          <span class="pk-caret" aria-hidden="true">▾</span>
+        </button>
+        <div class="picker-pop" id="projectPop" hidden role="dialog" aria-label="Elegir proyecto">
+          <input class="picker-search" id="projectSearch" placeholder="filtrar proyectos…" autocomplete="off">
+          <div class="picker-list" id="projectList" role="listbox"></div>
+          <button class="picker-new" id="projectNew">+ nuevo proyecto</button>
+        </div>
+      </div>
     </div>
 
     <!-- demo simulator controls (demo only) -->
@@ -76,16 +90,22 @@
     <div class="stat"><span class="k" id="k1">SPAWNS DESPACHADOS</span><span class="v" id="stMsg">0</span></div>
     <div class="stat"><span class="k" id="k2">TRABAJANDO AHORA</span><span class="v" id="stAg">0<small>/13</small></span></div>
     <div class="stat"><span class="k" id="k3">VENTANA</span><span class="v" id="stTime">00:00</span></div>
-    <div class="stat prog">
-      <span class="k">PROGRESO</span>
-      <div class="progbar"><i id="progFill"></i></div>
-    </div>
+    <!-- honest burst metric (replaces the historical progress bar) -->
+    <div class="stat burst" id="burstStat" hidden><span class="k">RÁFAGA</span><span class="v" id="burstV">—</span></div>
+  </div>
+
+  <!-- SITREP strip (/SITREP — narrator) — shown only when the bridge enables it -->
+  <div class="sitrep" id="sitrep" hidden>
+    <span class="sitrep-h">SITREP</span>
+    <span class="sitrep-text" id="sitrepText">esperando actividad…</span>
+    <span class="sitrep-time" id="sitrepTime"></span>
+    <button class="sitrep-refresh" id="sitrepRefresh" title="Refrescar" aria-label="Refrescar SITREP">⟳</button>
   </div>
 
   <!-- main grid -->
   <main class="grid" id="grid">
     <aside class="panelbox">
-      <div class="head"><span>CAPAS / AGENTES</span><span id="rosterCount">13</span></div>
+      <div class="head"><span class="shead">CAPAS</span><span class="cnt" id="rosterCount">13</span></div>
       <div class="roster" id="roster"></div>
     </aside>
 
@@ -98,7 +118,7 @@
 
     <aside class="panelbox side">
       <div class="tabs">
-        <button id="tabFeed" class="on">FEED EN VIVO</button>
+        <button id="tabFeed" class="on">FEED</button>
         <button id="tabAgent">AGENTE</button>
       </div>
       <div class="feed" id="feed"></div>
@@ -112,13 +132,21 @@
   <!-- composer — THE single dispatch flow -->
   <footer class="composer" id="composer">
     <div class="comp-head">
-      <span>COMPOSER · TAREA PARA EL ORQUESTADOR</span>
+      <span class="shead">COMPOSER · TAREA PARA EL ORQUESTADOR</span>
       <span class="leg">pega texto, código o imágenes · Ctrl+Enter despacha</span>
     </div>
     <textarea id="compText" rows="5" placeholder="Escribe o pega aquí tu tarea completa: specs, código, contexto… También puedes pegar IMÁGENES (Ctrl+V) o arrastrarlas."></textarea>
     <div class="comp-imgs" id="compImgs"></div>
     <div class="comp-foot">
-      <input id="compDir" type="text" list="compDirRecents" placeholder="Carpeta del proyecto (absoluta), ej: C:\Work\onlyreels">
+      <!-- active project (read-only) + picker access — replaces the typed path -->
+      <div class="comp-project" id="compProject">
+        <span class="cp-lbl">PROYECTO</span>
+        <span class="cp-name" id="cpName">GLOBAL</span>
+        <span class="cp-path" id="cpPath"></span>
+        <button class="cp-change" id="cpChange" type="button">cambiar ▾</button>
+      </div>
+      <!-- manual path fallback — only revealed if GET /api/projects fails -->
+      <input id="compDir" type="text" list="compDirRecents" placeholder="Carpeta del proyecto (absoluta), ej: C:\Work\onlyreels" hidden>
       <datalist id="compDirRecents"></datalist>
       <span class="comp-thread" id="compThread" title="Cada proyecto tiene su propio hilo persistente con el architect"></span>
       <button class="btn" id="compNew" title="Resetear la conversación de ESTE proyecto y limpiar su vista">↺ Nueva conv.</button>
@@ -151,6 +179,7 @@
 </div>
 
 <script src="agents.js"></script>
+<script src="lib/slot-text.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
