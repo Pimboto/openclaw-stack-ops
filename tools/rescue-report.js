@@ -20,7 +20,10 @@ for (const ln of lines) {
     }
   } catch { /* skip non-json lines */ }
 }
-const last = texts[texts.length - 1] || '';
+// Skip protocol sentinels (e.g. NO_REPLY turns after announce handling) and
+// pick the last substantive message.
+const meaningful = texts.filter(t => t !== 'NO_REPLY' && t.length > 40);
+const last = meaningful[meaningful.length - 1] || texts[texts.length - 1] || '';
 if (!last) { console.error('no assistant messages found'); process.exit(1); }
 
 const header = '# ' + (title || 'Reporte rescatado') + '\n\n> Rescatado del transcript de sesión por Stack Ops.\n\n';
