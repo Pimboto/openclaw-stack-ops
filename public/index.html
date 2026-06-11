@@ -12,7 +12,7 @@
 <body>
 <div class="app">
 
-  <!-- barra de comando -->
+  <!-- command bar -->
   <header class="bar">
     <div class="brand">
       <div class="claw">🦞</div>
@@ -21,19 +21,19 @@
         <div class="sub">ORQUESTADOR · ESPECIALISTAS · CRÍTICOS</div>
       </div>
     </div>
-    <div class="mode" id="mode">
-      <button id="modeLive" title="Datos reales del gateway vía SSE">LIVE</button>
-      <button id="modeDemo" title="Simulador guionado (sin gateway)">DEMO</button>
-    </div>
+
+    <div class="pill" id="pill" data-st="idle"><span class="dot"></span><span id="pillTxt">EN ESPERA</span></div>
+
+    <!-- fleet model + effort (live only) -->
     <div class="fleet" id="fleet" title="Modelo + effort de TODA la flota (28 agentes)">
       <span class="flbl">FLOTA</span>
-      <select id="fleetModel">
+      <select id="fleetModel" aria-label="Modelo de la flota">
         <option value="anthropic/claude-opus-4-8">Opus 4.8</option>
         <option value="anthropic/claude-sonnet-4-6">Sonnet 4.6</option>
         <option value="anthropic/claude-opus-4-7">Opus 4.7</option>
         <option value="anthropic/claude-fable-5">Fable 5 ⚠</option>
       </select>
-      <select id="fleetThinking">
+      <select id="fleetThinking" aria-label="Effort de la flota">
         <option value="off">effort: off</option>
         <option value="low">effort: low</option>
         <option value="medium">effort: medium</option>
@@ -43,40 +43,47 @@
       </select>
       <button class="btn" id="fleetApply">Aplicar</button>
     </div>
-    <div class="cmd">
-      <input id="task" type="text" placeholder="Escribe una tarea para el orquestador…" autocomplete="off">
+
+    <!-- project selector (live only) — filters feed / graph / stats -->
+    <div class="project" id="projectWrap" title="Proyecto activo — filtra el feed, el grafo y las stats por su hilo de sesión">
+      <span class="plbl">PROYECTO</span>
+      <select id="projectSel" aria-label="Proyecto activo"></select>
+    </div>
+
+    <!-- demo simulator controls (demo only) -->
+    <div class="demo-ctl" id="demoCtl" hidden>
+      <input id="task" type="text" placeholder="Escribe una tarea para el simulador…" autocomplete="off">
       <button class="btn primary" id="run">▶ Ejecutar</button>
       <button class="btn" id="pause" disabled>⏸ Pausar</button>
       <button class="btn" id="reset" disabled>⟲ Reiniciar</button>
-      <select id="speed" title="Velocidad (solo demo)">
+      <select id="speed" title="Velocidad (solo demo)" aria-label="Velocidad del simulador">
         <option value="0.5">0.5×</option>
         <option value="1" selected>1×</option>
         <option value="2">2×</option>
         <option value="4">4×</option>
       </select>
     </div>
-    <div class="pill" id="pill" data-st="idle"><span class="dot"></span><span id="pillTxt">EN ESPERA</span></div>
   </header>
 
-  <!-- escenarios (solo demo) -->
-  <div class="chips" id="chips">
+  <!-- scenarios (demo only) -->
+  <div class="chips" id="chips" hidden>
     <span class="lbl">ESCENARIOS</span>
   </div>
 
   <!-- stats -->
   <div class="stats">
-    <div class="stat"><span class="k" id="k0">TOKENS QUEMADOS</span><span class="v" id="stTk">0</span></div>
-    <div class="stat"><span class="k" id="k1">MENSAJES ENTRE AGENTES</span><span class="v" id="stMsg">0</span></div>
-    <div class="stat"><span class="k" id="k2">AGENTES ACTIVOS</span><span class="v" id="stAg">0<small>/13</small></span></div>
-    <div class="stat"><span class="k" id="k3">TIEMPO</span><span class="v" id="stTime">00:00</span></div>
+    <div class="stat"><span class="k" id="k0">RUNS COMPLETADOS</span><span class="v" id="stTk">0</span></div>
+    <div class="stat"><span class="k" id="k1">SPAWNS DESPACHADOS</span><span class="v" id="stMsg">0</span></div>
+    <div class="stat"><span class="k" id="k2">TRABAJANDO AHORA</span><span class="v" id="stAg">0<small>/13</small></span></div>
+    <div class="stat"><span class="k" id="k3">VENTANA</span><span class="v" id="stTime">00:00</span></div>
     <div class="stat prog">
       <span class="k">PROGRESO</span>
       <div class="progbar"><i id="progFill"></i></div>
     </div>
   </div>
 
-  <!-- grid principal -->
-  <main class="grid">
+  <!-- main grid -->
+  <main class="grid" id="grid">
     <aside class="panelbox">
       <div class="head"><span>CAPAS / AGENTES</span><span id="rosterCount">13</span></div>
       <div class="roster" id="roster"></div>
@@ -97,9 +104,12 @@
       <div class="feed" id="feed"></div>
       <div class="agentP" id="agentP"></div>
     </aside>
+
+    <!-- mobile-only toggle to reveal the radial map + roster (secondary on small screens) -->
+    <button class="graph-toggle" id="graphToggle" aria-expanded="false">▤ Mostrar mapa de la flota</button>
   </main>
 
-  <!-- composer -->
+  <!-- composer — THE single dispatch flow -->
   <footer class="composer" id="composer">
     <div class="comp-head">
       <span>COMPOSER · TAREA PARA EL ORQUESTADOR</span>
@@ -111,17 +121,35 @@
       <input id="compDir" type="text" list="compDirRecents" placeholder="Carpeta del proyecto (absoluta), ej: C:\Work\onlyreels">
       <datalist id="compDirRecents"></datalist>
       <span class="comp-thread" id="compThread" title="Cada proyecto tiene su propio hilo persistente con el architect"></span>
-      <button class="btn" id="compNew" title="Resetear la conversación de ESTE proyecto (manda /new a su hilo)">↺ Nueva conv.</button>
+      <button class="btn" id="compNew" title="Resetear la conversación de ESTE proyecto y limpiar su vista">↺ Nueva conv.</button>
       <button class="btn primary" id="compSend">▶ Despachar al ARCHITECT</button>
     </div>
   </footer>
 
   <div class="foot">
     <span id="footStatus">openclaw-stack-ops</span>
-    <span><a href="https://github.com/" id="footLink">MIT · hecho para fleets multi-agente de OpenClaw</a></span>
+    <span><a href="?demo=1" id="demoLink">modo demo</a> · <a href="https://github.com/" id="footLink">MIT · hecho para fleets multi-agente de OpenClaw</a></span>
   </div>
 
 </div>
+
+<!-- toasts: polite by default, assertive region for errors -->
+<div class="toasts" id="toasts" aria-live="polite" aria-atomic="false"></div>
+<div class="toasts" id="toastsErr" aria-live="assertive" aria-atomic="false"></div>
+
+<!-- token prompt (discreet modal) -->
+<div class="modal-back" id="modalBack" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <h2 id="modalTitle">Token de acceso</h2>
+    <p id="modalReason" class="modal-reason">Este bridge requiere un token de acceso.</p>
+    <input id="modalInput" type="password" autocomplete="off" placeholder="Pega tu STACKOPS_TOKEN">
+    <div class="modal-actions">
+      <button class="btn" id="modalCancel">Cancelar</button>
+      <button class="btn primary" id="modalOk">Guardar y continuar</button>
+    </div>
+  </div>
+</div>
+
 <script src="agents.js"></script>
 <script src="app.js"></script>
 </body>

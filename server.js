@@ -13,16 +13,20 @@
  *   POST /api/run     → { message, agent? } dispatch a real task via the CLI
  *
  * Config (env vars):
- *   PORT          HTTP port            (default 7788)
- *   HOST          bind address         (default 127.0.0.1 — keep it local!)
- *   OPENCLAW_BIN  CLI command          (default "openclaw")
- *   POLL_MS       poll interval in ms  (default 2500)
+ *   PORT            HTTP port            (default 7788)
+ *   HOST            bind address         (default 127.0.0.1 — keep it local!)
+ *   OPENCLAW_BIN    CLI command          (default "openclaw")
+ *   POLL_MS         poll interval in ms  (default 2500)
+ *   STACKOPS_TOKEN  shared secret        (unset = no auth; set = require token
+ *                                         on /api/* and /events — needed before
+ *                                         exposing the bridge off localhost)
  */
 'use strict';
 
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { exec, spawn } = require('child_process');
 
 const PORT = parseInt(process.env.PORT || '7788', 10);
@@ -31,6 +35,13 @@ const BIN = process.env.OPENCLAW_BIN || 'openclaw';
 const POLL_MS = Math.max(1000, parseInt(process.env.POLL_MS || '2500', 10));
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const IS_WIN = process.platform === 'win32';
+
+// Optional shared-secret auth. When STACKOPS_TOKEN is set, every /api/* and
+// /events request must present it (header or ?token=); static files stay open
+// so the UI can load and prompt for the token. Unset = current local behavior.
+const TOKEN = process.env.STACKOPS_TOKEN || '';
+const AUTH_ON = TOKEN.length > 0;
+const TOKEN_DIGEST = AUTH_ON ? crypto.createHash('sha256').update(TOKEN, 'utf8').digest() : null;
 
 /* ----------------------------- state ----------------------------- */
 
@@ -56,6 +67,18 @@ function agentFromSessionKey(key) {
   if (typeof key !== 'string') return null;
   const m = key.match(/^agent:([^:]+):/);
   return m ? m[1] : null;
+}
+
+const PROJECT_SESSION_RE = /^p-[a-z0-9-]+$/;
+function sessionFromSessionKey(key) {
+  // Project-thread id of the dispatching session, e.g.
+  // "agent:architect:p-c-work-onlyreels" -> "p-c-work-onlyreels".
+  // main/subagent/legacy keys (e.g. "agent:foo:subagent:<uuid>") -> null,
+  // so the UI routes them to the "global" view.
+  if (typeof key !== 'string') return null;
+  const m = key.match(/^agent:[^:]+:(.+)$/);
+  if (!m) return null;
+  return PROJECT_SESSION_RE.test(m[1]) ? m[1] : null;
 }
 
 const SHARP_RE = /SHARP:\s*S\s*=\s*(\d)\s*H\s*=\s*(\d)\s*A\s*=\s*(\d)\s*R\s*=\s*(\d)\s*P\s*=\s*(\d)\s*TOTAL\s*=\s*(\d+)\s*\/\s*25\s*VERDICT\s*=\s*(APPROVE|REVISE)/i;
@@ -111,8 +134,9 @@ function pushEvent(evt) {
 function normalizeTask(raw) {
   const child = agentFromSessionKey(raw.childSessionKey) || raw.agentId || null;
   const requester = agentFromSessionKey(raw.requesterSessionKey) || null;
+  const session = sessionFromSessionKey(raw.requesterSessionKey); // project thread, or null
   const summary = raw.progressSummary || raw.terminalSummary || '';
-  return {
+  const task = {
     taskId: raw.taskId,
     runtime: raw.runtime || 'subagent',
     child,
@@ -127,22 +151,26 @@ function normalizeTask(raw) {
     startedAt: raw.startedAt || raw.createdAt || null,
     endedAt: raw.endedAt || null,
   };
+  // Optional contract field: only present for project-thread dispatches.
+  if (session) task.session = session;
+  return task;
 }
 
 function emitTransition(prev, cur) {
   const isCritic = cur.child && cur.child.endsWith('-critic');
   const selfRun = !cur.requester || cur.requester === cur.child; // top-level run (no dispatcher arrow)
+  const session = cur.session; // undefined for non-project threads → dropped by JSON.stringify
   if (!prev) {
     // Newly discovered task.
     if (!selfRun) {
       pushEvent({
         type: 'spawn', a: cur.requester, to: cur.child,
-        text: cur.title, taskId: cur.taskId, critic: isCritic,
+        text: cur.title, taskId: cur.taskId, critic: isCritic, session,
         t: cur.startedAt || Date.now(),
       });
     }
     if (cur.status === 'running' || cur.status === 'queued') {
-      pushEvent({ type: 'work', a: cur.child, text: cur.title, taskId: cur.taskId, critic: isCritic });
+      pushEvent({ type: 'work', a: cur.child, text: cur.title, taskId: cur.taskId, critic: isCritic, session });
     }
   }
   const statusChanged = prev && prev.status !== cur.status;
@@ -151,17 +179,17 @@ function emitTransition(prev, cur) {
       pushEvent({
         type: 'done', a: cur.child, to: cur.requester,
         text: cur.summary || 'completado', sharp: cur.sharp,
-        taskId: cur.taskId, critic: isCritic, t: cur.endedAt || Date.now(),
+        taskId: cur.taskId, critic: isCritic, session, t: cur.endedAt || Date.now(),
       });
     } else {
       pushEvent({
         type: 'fail', a: cur.child, to: cur.requester,
-        text: cur.error || cur.status, taskId: cur.taskId, critic: isCritic,
+        text: cur.error || cur.status, taskId: cur.taskId, critic: isCritic, session,
         t: cur.endedAt || Date.now(),
       });
     }
   } else if (statusChanged && cur.status === 'running') {
-    pushEvent({ type: 'work', a: cur.child, text: cur.title, taskId: cur.taskId, critic: isCritic });
+    pushEvent({ type: 'work', a: cur.child, text: cur.title, taskId: cur.taskId, critic: isCritic, session });
   }
 }
 
@@ -184,6 +212,8 @@ async function poll() {
       const cur = normalizeTask(raw);
       if (!cur.child) continue;
       const prev = state.tasks.get(cur.taskId) || null;
+      // A later poll may omit requesterSessionKey; don't lose a session we already had.
+      if (!cur.session && prev && prev.session) cur.session = prev.session;
       state.tasks.set(cur.taskId, cur);
       if (!firstPollDone) continue; // history is delivered via snapshot, not as live events
       if (!prev || prev.status !== cur.status) emitTransition(prev, cur);
@@ -260,15 +290,18 @@ function dispatchRun(message, agent, sessionKey) {
     child.stdout.on('data', cap);
     child.stderr.on('data', cap);
     child.on('error', reject);
+    // Only emit `session` when sk matches the documented p-<slug> contract; the
+    // raw sk still drives --session-key above so arbitrary callers still dispatch.
+    const session = (sk && PROJECT_SESSION_RE.test(sk)) ? sk : undefined;
     child.on('exit', (code) => {
       try { fs.appendFileSync(logPath, `[${new Date().toISOString()}] run ${target} exited code=${code}\n${out.slice(-4000)}\n`); } catch { /* noop */ }
       if (code === 0) {
-        pushEvent({ type: 'done', a: target, text: extractReply(out) || 'turno completado' });
+        pushEvent({ type: 'done', a: target, text: extractReply(out) || 'turno completado', session });
       } else {
-        pushEvent({ type: 'fail', a: target, text: `el run terminó con código ${code} — revisa dispatch.log` });
+        pushEvent({ type: 'fail', a: target, text: `el run terminó con código ${code} — revisa dispatch.log`, session });
       }
     });
-    pushEvent({ type: 'sys', text: `tarea despachada a "${target}" — los spawns aparecerán en cuanto el orquestador reparta` });
+    pushEvent({ type: 'sys', text: `tarea despachada a "${target}" — los spawns aparecerán en cuanto el orquestador reparta`, session });
     resolve({ ok: true, agent: target });
   });
 }
@@ -286,10 +319,18 @@ const MIME = {
 };
 
 function serveStatic(req, res) {
-  const urlPath = decodeURIComponent((req.url || '/').split('?')[0]);
+  let urlPath;
+  try {
+    // Malformed percent-encoding (e.g. "/%" or "/%zz") makes decodeURIComponent
+    // throw URIError. Static files are unauthenticated, so without this guard a
+    // single bad request would crash the synchronous handler and kill the bridge.
+    urlPath = decodeURIComponent((req.url || '/').split('?')[0]);
+  } catch { res.writeHead(400); return res.end('url inválida'); }
   let file = urlPath === '/' ? '/index.html' : urlPath;
   const full = path.normalize(path.join(PUBLIC_DIR, file));
-  if (!full.startsWith(PUBLIC_DIR)) { res.writeHead(403); return res.end('forbidden'); }
+  // Require the path separator so a sibling like `public-x` can't pass the prefix
+  // check; `full === PUBLIC_DIR` (e.g. url "//") falls through and 404s on readFile.
+  if (full !== PUBLIC_DIR && !full.startsWith(PUBLIC_DIR + path.sep)) { res.writeHead(403); return res.end('forbidden'); }
   fs.readFile(full, (err, buf) => {
     if (err) { res.writeHead(404); return res.end('not found'); }
     res.writeHead(200, { 'Content-Type': MIME[path.extname(full)] || 'application/octet-stream' });
@@ -302,8 +343,40 @@ function json(res, code, obj) {
   res.end(JSON.stringify(obj));
 }
 
+function extractToken(req) {
+  // EventSource can't set headers, so ?token= is the SSE path; fetches use headers.
+  const auth = req.headers['authorization'];
+  if (typeof auth === 'string' && /^Bearer\s+/i.test(auth)) return auth.replace(/^Bearer\s+/i, '').trim();
+  const x = req.headers['x-stackops-token'];
+  if (typeof x === 'string' && x.trim()) return x.trim();
+  const qi = (req.url || '').indexOf('?');
+  if (qi !== -1) {
+    // Defensive: never let query-string parsing throw on malformed network input.
+    try {
+      const t = new URLSearchParams(req.url.slice(qi + 1)).get('token');
+      if (t) return t;
+    } catch { /* malformed query string → treat as no token */ }
+  }
+  return null;
+}
+
+function tokenOk(req) {
+  if (!AUTH_ON) return true;
+  const provided = extractToken(req);
+  if (!provided) return false;
+  // Hash both sides to a fixed 32-byte digest: timing-safe and length-blind.
+  const got = crypto.createHash('sha256').update(provided, 'utf8').digest();
+  return crypto.timingSafeEqual(got, TOKEN_DIGEST);
+}
+
 const server = http.createServer((req, res) => {
   const url = (req.url || '/').split('?')[0];
+
+  // Auth gate: protect data/dispatch surfaces; static files stay open so the
+  // UI can load and prompt for the token (they expose no fleet data).
+  if (AUTH_ON && (url === '/events' || url.startsWith('/api/')) && !tokenOk(req)) {
+    return json(res, 401, { ok: false, error: 'token requerido' });
+  }
 
   if (url === '/events') {
     res.writeHead(200, {
@@ -437,6 +510,9 @@ const server = http.createServer((req, res) => {
 server.listen(PORT, HOST, () => {
   log(`OpenClaw Stack Ops → http://${HOST}:${PORT}`);
   log(`bridge: "${BIN}" · poll cada ${POLL_MS}ms`);
+  log(AUTH_ON
+    ? 'auth: ACTIVA (STACKOPS_TOKEN) — /api/* y /events exigen token'
+    : 'auth: desactivada — solo para uso local (127.0.0.1)');
   poll();
   setInterval(poll, POLL_MS);
   setInterval(() => {

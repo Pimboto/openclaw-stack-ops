@@ -2,7 +2,12 @@
    OPENCLAW STACK OPS · app
    Two engines, one renderer:
    - LIVE: real events from the bridge (/events, SSE)
-   - DEMO: scripted simulator (no gateway required)
+   - DEMO: scripted simulator (no gateway required, gated behind ?demo=1)
+
+   Projects are first-class: every live event/task may carry an optional
+   `session` slug (a per-project architect thread). The active project
+   filters feed / graph node state / stats; "GLOBAL" shows everything,
+   including legacy events that carry no session.
    ============================================================ */
 'use strict';
 
@@ -39,12 +44,14 @@ const RM = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const ST = {
   mode: null,                 // 'live' | 'demo'
   selected: null,
+  project: null,              // null = GLOBAL, else { dir, slug }
+  feedLog: [],                // [{cls, html, ts, session, global}] — source of truth for the feed
   agents: {},                 // id -> {status,current,msgs[],sharp,collabs{},tokens}
   // demo engine
   vt: 0, running: false, paused: false, speed: 1,
   script: null, idx: 0, lastEnd: {}, doneFlag: {}, totals: { tk: 0, msg: 0 }, shownTk: 0, finished: false,
   // live engine
-  live: { es: null, tasks: new Map(), t0: null, spawns: 0, ok: 0, fail: 0, dirty: false, firstEventAt: null },
+  live: { es: null, tasks: new Map(), t0: null, spawns: 0, ok: 0, fail: 0, dirty: false, firstEventAt: null, sseWasDown: false },
 };
 let POS = {}, CPOS = {}, HUB = { x: 0, y: 0 }, particles = [], nodeEls = {}, cnodeEls = {}, rosterEls = {}, tlRows = {}, tlBarEls = [], firstTrack = null;
 
@@ -58,6 +65,9 @@ function freshAgents() {
 }
 const gcol = id => (GROUPS[AG[id]?.g] || GROUPS.other).c;
 function fmtTk(n) { return n >= 1000 ? (n / 1000).toFixed(1) + 'k' : Math.round(n); }
+// escape agent-provided text before it lands in innerHTML (defense in depth: the
+// feed/panel build HTML strings, and event text comes from arbitrary agents).
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
 function fmtT(s) { const m = Math.floor(s / 60), ss = Math.floor(s % 60); return String(m).padStart(2, '0') + ':' + String(ss).padStart(2, '0'); }
 function fmtClock(ms) { return new Date(ms).toLocaleTimeString('en-US', { hour12: true, hour: 'numeric', minute: '2-digit', second: '2-digit' }); }
 function ensureAgent(id) {
@@ -65,6 +75,130 @@ function ensureAgent(id) {
   if (AG[id]) return;
   AG[id] = { id, code: id.slice(0, 6).toUpperCase(), cap: id, g: 'other', isCritic: id.endsWith('-critic'), desc: 'Agente descubierto en runtime (no está en agents.js).' };
   ST.agents[id] = { status: 'idle', current: null, msgs: [], sharp: null, collabs: {}, tokens: 0, activeUntil: 0 };
+}
+
+/* ============================================================
+   PROJECTS · AUTH · TOASTS · MODAL  (cross-cutting infra)
+   ============================================================ */
+// session slug for a project folder — MUST match the bridge's per-project key.
+const projSlug = d => 'p-' + d.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(-40);
+function loadRecents() { try { return JSON.parse(localStorage.getItem('stackops-projects') || '[]'); } catch { return []; } }
+function saveRecentDir(dir) {
+  if (!dir) return;
+  const r = loadRecents().filter(p => p.dir !== dir);
+  r.unshift({ dir, last: Date.now() });
+  localStorage.setItem('stackops-projects', JSON.stringify(r.slice(0, 12)));
+}
+// active project filter: null = GLOBAL (show everything, incl. legacy/no-session)
+function curSlug() { return ST.project ? ST.project.slug : null; }
+function feedVisible(e) {
+  const s = curSlug();
+  if (!s) return true;        // GLOBAL
+  if (e.global) return true;  // global system lines (gateway/bridge/composer)
+  return e.session === s;
+}
+function evtVisible(session, type) {
+  const s = curSlug();
+  if (!s) return true;                       // GLOBAL
+  if (!session && type === 'sys') return true; // global system event
+  return session === s;
+}
+function taskVisible(t) { const s = curSlug(); if (!s) return true; return (t.session || null) === s; }
+
+/* ---- auth token ---- */
+function getToken() { return localStorage.getItem('stackops-token') || ''; }
+function setToken(t) { if (t) localStorage.setItem('stackops-token', t); else localStorage.removeItem('stackops-token'); }
+
+let _modalResolve = null;
+let _modalPromise = null;    // shared while the modal is open: concurrent 401s reuse it (serialize)
+let _modalPrevFocus = null;  // element focused before the modal opened (restored on close)
+let _modalKeydown = null;    // active Escape + focus-trap handler
+function askToken(reason) {
+  const back = $('modalBack');
+  if (!back) return Promise.resolve(window.prompt(reason || 'Token de acceso') || null);
+  // serialize: if the modal is already open, every caller awaits the SAME promise
+  // and reuses its single result (no _modalResolve clobbering, no orphaned promise).
+  if (_modalPromise) return _modalPromise;
+  _modalPromise = new Promise(resolve => {
+    $('modalReason').textContent = reason || 'Este bridge requiere un token de acceso.';
+    const inp = $('modalInput'); inp.value = getToken();
+    back.hidden = false;
+    _modalPrevFocus = document.activeElement;
+    setTimeout(() => { inp.focus(); inp.select(); }, 30);
+    _modalResolve = resolve;
+    // Escape cancels; Tab is trapped between the input and the two action buttons.
+    _modalKeydown = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); closeModal(null); return; }
+      if (e.key !== 'Tab') return;
+      const f = [inp, $('modalCancel'), $('modalOk')].filter(Boolean);
+      if (f.length < 2) return;
+      const first = f[0], last = f[f.length - 1], active = document.activeElement;
+      if (e.shiftKey && active === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && active === last) { e.preventDefault(); first.focus(); }
+    };
+    back.addEventListener('keydown', _modalKeydown);
+  });
+  return _modalPromise;
+}
+function closeModal(val) {
+  const back = $('modalBack');
+  if (back) {
+    back.hidden = true;
+    if (_modalKeydown) { back.removeEventListener('keydown', _modalKeydown); _modalKeydown = null; }
+  }
+  const prev = _modalPrevFocus; _modalPrevFocus = null;
+  _modalPromise = null;
+  if (_modalResolve) { const r = _modalResolve; _modalResolve = null; r(val); }
+  if (prev && typeof prev.focus === 'function') { try { prev.focus(); } catch { /* element gone */ } }
+}
+
+// authenticated fetch: attaches Bearer token; on 401 asks for a token once, retries.
+async function apiFetch(url, opts = {}) {
+  opts = Object.assign({}, opts);
+  opts.headers = Object.assign({}, opts.headers || {});
+  const t = getToken();
+  if (t) opts.headers['Authorization'] = 'Bearer ' + t;
+  let r = await fetch(url, opts);
+  if (r.status === 401) {
+    // capture BEFORE await: the opener is the caller for whom no shared modal existed
+    // yet. Concurrent 401s reuse the same modal/result — only the opener runs the
+    // global side effects (toast + reconnect) so they fire exactly once.
+    const iOpenedModal = !_modalPromise;
+    const nt = await askToken('El bridge pide un token de acceso. Pégalo para continuar.');
+    if (!nt) throw new Error('token requerido');
+    setToken(nt);
+    // Rebuild options for the retry WITHOUT the original abort signal: typing the
+    // token can take far longer than any timeout (e.g. AbortSignal.timeout), so the
+    // caller's signal may already have aborted. Reusing it throws AbortError instantly
+    // — the token would be saved unvalidated and the boot would misread it as "no bridge".
+    const retryOpts = Object.assign({}, opts);
+    delete retryOpts.signal;
+    retryOpts.headers = Object.assign({}, opts.headers, { 'Authorization': 'Bearer ' + nt });
+    r = await fetch(url, retryOpts);
+    if (r.status === 401) { setToken(''); if (iOpenedModal) toast('Token rechazado — vuelve a intentarlo', 'error'); throw new Error('token rechazado'); }
+    if (iOpenedModal) {
+      toast('Token guardado', 'success');
+      if (ST.mode === 'live') { disconnectLive(); connectLive(); } // reconnect SSE with the new token
+    }
+  }
+  return r;
+}
+
+/* ---- toasts ---- */
+function toast(msg, type = 'info', opts = {}) {
+  const assertive = type === 'error';
+  const host = assertive ? $('toastsErr') : $('toasts');
+  if (!host) return;
+  const el = document.createElement('div');
+  el.className = 'toast ' + type;
+  el.setAttribute('role', assertive ? 'alert' : 'status');
+  el.innerHTML = '<span class="msg"></span><button class="x" aria-label="Cerrar">×</button>';
+  el.querySelector('.msg').textContent = msg;
+  const close = () => { el.classList.add('out'); setTimeout(() => el.remove(), 200); };
+  el.querySelector('.x').addEventListener('click', close);
+  host.appendChild(el);
+  const ttl = opts.ttl != null ? opts.ttl : (type === 'error' ? 8000 : 4000);
+  if (ttl > 0) setTimeout(close, ttl);
 }
 
 /* ============================================================
@@ -156,6 +290,7 @@ function buildGraph() {
 
 function layout() {
   const w = stage.clientWidth, h = stage.clientHeight;
+  if (!w || !h) return; // stage collapsed (mobile) — skip until shown
   net.setAttribute('viewBox', '0 0 ' + w + ' ' + h);
   fx.width = w * devicePixelRatio; fx.height = h * devicePixelRatio;
   fx.style.width = w + 'px'; fx.style.height = h + 'px';
@@ -231,7 +366,7 @@ function drawParticles() {
   ctx.globalAlpha = 1;
 }
 
-/* ---------- timeline ---------- */
+/* ---------- timeline (dormant: panel currently not in the DOM) ---------- */
 function buildTimelineRows() {
   if (!tlWrap) return; // timeline panel replaced by composer
   tlWrap.innerHTML = ''; tlRows = {};
@@ -257,22 +392,53 @@ function movePlayhead(frac) {
 }
 
 /* ---------- feed ---------- */
+const FEED_LOG_CAP = 600;  // entries kept in ST.feedLog (source of truth)
+const FEED_DOM_CAP = 350;  // .fl nodes kept in the DOM (render budget)
 function stamp() {
   return ST.mode === 'demo' ? fmtT(ST.vt) : fmtClock(Date.now());
 }
-function feedLine(cls, html, ts) {
-  const d = document.createElement('div');
-  d.className = 'fl ' + cls;
-  d.innerHTML = '<span class="t">[' + (ts || stamp()) + ']</span>' + html;
-  feed.appendChild(d);
-  while (feed.children.length > 350) feed.removeChild(feed.firstChild);
+// feedLine pushes to the log (source of truth) and appends to the DOM if it
+// passes the active project filter. opts: { session, global }
+function feedLine(cls, html, ts, opts) {
+  ts = ts || stamp();
+  const entry = { cls, html, ts, session: (opts && opts.session) || null, global: !!(opts && opts.global) };
+  ST.feedLog.push(entry);
+  while (ST.feedLog.length > FEED_LOG_CAP) ST.feedLog.shift();
+  if (feedVisible(entry)) {
+    const es = feed.querySelector('.feed-empty'); if (es) es.remove();
+    const d = document.createElement('div');
+    d.className = 'fl ' + cls;
+    d.innerHTML = '<span class="t">[' + ts + ']</span>' + html;
+    feed.appendChild(d);
+    while (feed.children.length > FEED_DOM_CAP) feed.removeChild(feed.firstChild);
+    feed.scrollTop = feed.scrollHeight;
+  }
+}
+function renderFeedEmpty() {
+  const s = curSlug();
+  const msg = s
+    ? 'No hay actividad en este proyecto todavía — despacha una tarea abajo.'
+    : 'Sin actividad aún — despacha una tarea desde el composer.';
+  feed.innerHTML = '<div class="feed-empty"><div class="glyph">◴</div><div class="txt">' + msg + '</div></div>';
+}
+// rebuild the whole feed from the log, filtered by the active project
+function renderFeed() {
+  feed.innerHTML = '';
+  const vis = ST.feedLog.filter(feedVisible);
+  if (!vis.length) { renderFeedEmpty(); return; }
+  vis.forEach(e => {
+    const d = document.createElement('div');
+    d.className = 'fl ' + e.cls;
+    d.innerHTML = '<span class="t">[' + e.ts + ']</span>' + e.html;
+    feed.appendChild(d);
+  });
   feed.scrollTop = feed.scrollHeight;
 }
 const tag = id => '<span class="tag" style="color:' + (AG[id]?.isHub ? 'var(--coral)' : gcol(id)) + '">[' + (AG[id]?.isCritic ? (AG[parentOf[id]]?.code || '?') + '·C' : (AG[id]?.code || id)) + ']</span> ';
 function sharpHtml(sh) {
   if (!sh) return '';
   const cls = sh.verdict === 'APPROVE' ? '' : ' warn';
-  return '<br><span class="sharpline' + cls + '">SHARP ' + sh.S + '/' + sh.H + '/' + sh.A + '/' + sh.R + '/' + sh.P + ' · ' + sh.total + '/25 · ' + sh.verdict + '</span>';
+  return '<br><span class="sharpline' + cls + '">SHARP ' + Number(sh.S) + '/' + Number(sh.H) + '/' + Number(sh.A) + '/' + Number(sh.R) + '/' + Number(sh.P) + ' · ' + Number(sh.total) + '/25 · ' + esc(sh.verdict) + '</span>';
 }
 
 /* ---------- status & sharp ---------- */
@@ -308,6 +474,16 @@ function setSharp(specId, sh) {
   }
   if (ST.selected === specId) renderAgentPanel(specId);
 }
+// reset every node / roster row / sharp badge back to idle (used on project switch)
+function clearGraphState() {
+  Object.keys(AG).forEach(id => {
+    const a = ST.agents[id];
+    if (a) { a.status = 'idle'; a.current = null; a.sharp = null; }
+    setStatus(id, 'idle');
+  });
+  Object.values(rosterEls).forEach(r => { const c = r.querySelector('.sharp'); c.textContent = '·'; c.className = 'sharp'; });
+  Object.values(nodeEls).forEach(n => { const b = n.querySelector && n.querySelector('.sharpbadge'); if (b) { b.textContent = ''; b.classList.remove('show', 'ok', 'warn'); } });
+}
 
 /* ---------- agent panel ---------- */
 function select(id) {
@@ -331,7 +507,7 @@ function renderAgentPanel(id) {
   h += '<div><h3>' + (a.isCritic ? (AG[parentOf[id]]?.cap || '') + ' · Critic' : (a.cap || a.id)) + '</h3><div class="gtag" style="color:' + c + '">' + (a.isHub ? 'ORQUESTADOR' : (a.isCritic ? 'CRÍTICO SHARP' : GROUPS[a.g].label)) + '</div></div></div>';
   h += '<div class="ag-state">' + STATUS_LONG[ag.status] + '</div>';
   h += '<div class="ag-sec"><div class="k">ROL</div><div class="v muted">' + (a.desc || '—') + '</div></div>';
-  h += '<div class="ag-sec"><div class="k">' + (ag.status === 'work' ? 'TRABAJANDO EN' : 'ÚLTIMA TAREA') + '</div><div class="v">' + (ag.current || '— todavía nada') + '</div></div>';
+  h += '<div class="ag-sec"><div class="k">' + (ag.status === 'work' ? 'TRABAJANDO EN' : 'ÚLTIMA TAREA') + '</div><div class="v">' + (ag.current ? esc(ag.current) : '— todavía nada') + '</div></div>';
   const sh = ag.sharp || (a.isCritic ? ST.agents[parentOf[id]]?.sharp : null);
   if (sh) {
     h += '<div class="ag-sec"><div class="k">ÚLTIMO SHARP</div><div class="sharp-grid">';
@@ -355,7 +531,7 @@ function renderAgentPanel(id) {
   if (ag.msgs.length) {
     h += '<div class="ag-msgs">' + ag.msgs.slice(-6).reverse().map(m => {
       const arrow = m.dir === 'out' ? '→ <span class="who">' + (AG[m.other]?.code || m.other || '?') + '</span>' : '← <span class="who">' + (AG[m.other]?.code || m.other || '?') + '</span>';
-      return '<div class="m">' + arrow + ' · ' + m.text + '</div>';
+      return '<div class="m">' + arrow + ' · ' + esc(m.text) + '</div>';
     }).join('') + '</div>';
   } else h += '<div class="v muted">— sin mensajes</div>';
   h += '</div>';
@@ -412,14 +588,20 @@ function setStatLabels() {
 }
 function updateStats() {
   if (ST.mode === 'live') {
-    const L = ST.live;
-    $('stTk').textContent = L.ok;
-    $('stMsg').textContent = L.spawns;
+    // all counters reflect the active project filter
+    const tasks = [...ST.live.tasks.values()].filter(taskVisible);
+    const ok = tasks.filter(t => t.status === 'ok').length;
+    const fail = tasks.filter(t => t.status === 'fail').length;
+    const running = tasks.filter(t => t.status === 'run').length;
+    $('stTk').textContent = ok;
+    $('stMsg').textContent = tasks.length;
     const working = ALL.filter(id => ST.agents[id]?.status === 'work').length;
     $('stAg').innerHTML = working + '<small>/' + ALL.length + '</small>';
-    $('stTime').textContent = L.t0 ? fmtT((Date.now() - L.t0) / 1000) : '00:00';
-    const total = L.ok + L.fail + [...L.tasks.values()].filter(t => !t.end).length;
-    $('progFill').style.width = total ? Math.round(((L.ok + L.fail) / total) * 100) + '%' : '0%';
+    const starts = tasks.map(t => t.start).filter(Boolean);
+    const t0 = starts.length ? Math.min(...starts) : null;
+    $('stTime').textContent = t0 ? fmtT((Date.now() - t0) / 1000) : '00:00';
+    const total = ok + fail + running;
+    $('progFill').style.width = total ? Math.round(((ok + fail) / total) * 100) + '%' : '0%';
   } else {
     ST.shownTk += (ST.totals.tk - ST.shownTk) * 0.09;
     if (Math.abs(ST.totals.tk - ST.shownTk) < 1) ST.shownTk = ST.totals.tk;
@@ -450,6 +632,7 @@ function rebuildLiveTimeline() {
   const span = Math.max(now - t0, 60_000);
   $('tlTitle').textContent = 'TIMELINE · RUNS REALES';
   for (const t of L.tasks.values()) {
+    if (!taskVisible(t)) continue;
     const row = liveRowFor(t.agent);
     if (!row) continue;
     const track = tlRows[row].querySelector('.tl-track');
@@ -469,58 +652,89 @@ function rebuildLiveTimeline() {
   movePlayhead(1);
 }
 
+// recompute node / roster / sharp state from the (filtered) task map.
+// collabs / msgs are intentionally cumulative (global) — not re-derived here.
+function recomputeAgentsFromTasks() {
+  clearGraphState();
+  const tasks = [...ST.live.tasks.values()].filter(taskVisible).sort((a, b) => a.start - b.start);
+  for (const t of tasks) {
+    const id = t.agent;
+    ensureAgent(id);
+    if (t.status === 'ok') {
+      setStatus(id, 'done');
+      ST.agents[id].current = t.title || ST.agents[id].current;
+      if (t.sharp) { setSharp(parentOf[id] || id, t.sharp); if (cnodeEls[id]) ST.agents[id].sharp = t.sharp; }
+    } else if (t.status === 'fail') {
+      setStatus(id, 'fail');
+      ST.agents[id].current = t.title || ST.agents[id].current;
+    } else {
+      setStatus(id, 'work');
+      ST.agents[id].current = t.title || ST.agents[id].current;
+    }
+  }
+}
+
+// full re-render of the live view for the active project (feed + graph + stats)
+function renderLiveView() {
+  renderFeed();
+  recomputeAgentsFromTasks();
+  rebuildLiveTimeline();
+  updateStats();
+}
+
 function liveHandle(evt) {
   const L = ST.live;
   if (!L.firstEventAt) L.firstEventAt = Date.now();
+  const vis = evtVisible(evt.session, evt.type);
   switch (evt.type) {
     case 'sys':
-      feedLine('sys', '<span class="tag">[BRIDGE]</span> ' + evt.text, fmtClock(evt.t));
+      feedLine('sys', '<span class="tag">[BRIDGE]</span> ' + esc(evt.text), fmtClock(evt.t), { session: evt.session, global: !evt.session });
       break;
     case 'spawn': {
       if (evt.a) ensureAgent(evt.a);
       if (evt.to) ensureAgent(evt.to);
-      L.spawns++;
       if (!L.t0) L.t0 = evt.t || Date.now();
-      L.tasks.set(evt.taskId, { agent: evt.to, start: evt.t || Date.now(), end: null, critic: !!evt.critic, status: 'run' });
+      L.tasks.set(evt.taskId, { agent: evt.to, start: evt.t || Date.now(), end: null, critic: !!evt.critic, status: 'run', session: evt.session || null, title: evt.text || '' });
       recordMsg(evt.a || HUBCFG.id, evt.to, evt.text || 'spawn');
-      spawnP(evt.a || HUBCFG.id, evt.to, gcol(evt.to));
-      feedLine('spawn' + (evt.critic ? ' critic' : ''), tag(evt.a || HUBCFG.id) + '<span class="arrow">→</span> ' + tag(evt.to) + (evt.text || ''), fmtClock(evt.t));
+      if (vis) spawnP(evt.a || HUBCFG.id, evt.to, gcol(evt.to));
+      feedLine('spawn' + (evt.critic ? ' critic' : ''), tag(evt.a || HUBCFG.id) + '<span class="arrow">→</span> ' + tag(evt.to) + esc(evt.text || ''), fmtClock(evt.t), { session: evt.session });
       L.dirty = true;
       break;
     }
     case 'work':
       if (!evt.a) break;
       ensureAgent(evt.a);
-      setStatus(evt.a, 'work');
-      ST.agents[evt.a].current = evt.text || null;
+      if (vis) { setStatus(evt.a, 'work'); ST.agents[evt.a].current = evt.text || null; }
       break;
     case 'done': {
       if (!evt.a) break;
       ensureAgent(evt.a);
-      setStatus(evt.a, 'done');
-      ST.agents[evt.a].current = evt.text || ST.agents[evt.a].current;
-      L.ok++;
       const t = L.tasks.get(evt.taskId);
-      if (t) { t.end = evt.t || Date.now(); t.status = 'ok'; }
-      if (evt.sharp) {
-        // a critic's verdict scores its specialist; a specialist echoing SHARP scores itself
-        const target = parentOf[evt.a] || evt.a;
-        setSharp(target, evt.sharp);
-        if (cnodeEls[evt.a]) ST.agents[evt.a].sharp = evt.sharp;
+      if (t) { t.end = evt.t || Date.now(); t.status = 'ok'; if (evt.sharp) t.sharp = evt.sharp; if (evt.text) t.title = evt.text; }
+      if (vis) {
+        setStatus(evt.a, 'done');
+        ST.agents[evt.a].current = evt.text || ST.agents[evt.a].current;
+        if (evt.sharp) {
+          // a critic's verdict scores its specialist; a specialist echoing SHARP scores itself
+          const target = parentOf[evt.a] || evt.a;
+          setSharp(target, evt.sharp);
+          if (cnodeEls[evt.a]) ST.agents[evt.a].sharp = evt.sharp;
+        }
+        if (evt.to) { recordMsg(evt.a, evt.to, (evt.text || '').slice(0, 120)); spawnP(evt.a, evt.to, '#4ade80'); }
+      } else if (evt.to) {
+        recordMsg(evt.a, evt.to, (evt.text || '').slice(0, 120));
       }
-      if (evt.to) { recordMsg(evt.a, evt.to, (evt.text || '').slice(0, 120)); spawnP(evt.a, evt.to, 'var(--green)'.startsWith('var') ? '#4ade80' : '#4ade80'); }
-      feedLine('done' + (evt.critic ? ' critic' : ''), tag(evt.a) + '✅ ' + (evt.text || 'completado') + sharpHtml(evt.sharp), fmtClock(evt.t));
+      feedLine('done' + (evt.critic ? ' critic' : ''), tag(evt.a) + '✅ ' + esc(evt.text || 'completado') + sharpHtml(evt.sharp), fmtClock(evt.t), { session: evt.session });
       L.dirty = true;
       break;
     }
     case 'fail': {
       if (!evt.a) break;
       ensureAgent(evt.a);
-      setStatus(evt.a, 'fail');
-      L.fail++;
       const t = L.tasks.get(evt.taskId);
-      if (t) { t.end = evt.t || Date.now(); t.status = 'fail'; }
-      feedLine('fail', tag(evt.a) + '✕ ' + (evt.text || 'falló'), fmtClock(evt.t));
+      if (t) { t.end = evt.t || Date.now(); t.status = 'fail'; if (evt.text) t.title = evt.text; }
+      if (vis) setStatus(evt.a, 'fail');
+      feedLine('fail', tag(evt.a) + '✕ ' + esc(evt.text || 'falló'), fmtClock(evt.t), { session: evt.session });
       L.dirty = true;
       break;
     }
@@ -532,62 +746,85 @@ function liveSnapshot(snap) {
   ST.agents = freshAgents();
   const L = ST.live;
   L.tasks = new Map(); L.spawns = 0; L.ok = 0; L.fail = 0; L.t0 = null;
-  feed.innerHTML = '';
-  feedLine('sys', '<span class="tag">[BRIDGE]</span> conectado · ' + (snap.tasks?.length || 0) + ' runs en historial');
+  ST.feedLog = [];
+  feedLine('sys', '<span class="tag">[BRIDGE]</span> conectado · ' + (snap.tasks?.length || 0) + ' runs en historial', undefined, { global: true });
   const tasks = (snap.tasks || []).slice().sort((a, b) => (a.startedAt || 0) - (b.startedAt || 0));
   for (const t of tasks) {
     if (!t.child) continue;
     ensureAgent(t.child);
     if (t.requester) ensureAgent(t.requester);
     const isCritic = !!(t.child && t.child.endsWith('-critic'));
-    L.spawns++;
     if (!L.t0 && t.startedAt) L.t0 = t.startedAt;
+    const status = t.status === 'succeeded' ? 'ok' : (t.status === 'running' || t.status === 'queued' ? 'run' : 'fail');
     L.tasks.set(t.taskId, {
       agent: t.child, start: t.startedAt || Date.now(), end: t.endedAt || null,
-      critic: isCritic, status: t.status === 'succeeded' ? 'ok' : (t.status === 'running' || t.status === 'queued' ? 'run' : 'fail'),
+      critic: isCritic, status, session: t.session || null,
+      title: t.summary || t.title || '', sharp: t.sharp || null,
     });
     if (t.requester) recordMsg(t.requester, t.child, t.title || '');
-    if (t.status === 'succeeded') {
-      L.ok++;
-      setStatus(t.child, 'done');
-      ST.agents[t.child].current = t.summary || t.title;
-      if (t.sharp) setSharp(parentOf[t.child] || t.child, t.sharp);
-      feedLine('done' + (isCritic ? ' critic' : ''), tag(t.child) + '✅ ' + (t.title || 'run') + sharpHtml(t.sharp), fmtClock(t.endedAt || Date.now()));
-    } else if (t.status === 'running' || t.status === 'queued') {
-      setStatus(t.child, 'work');
-      ST.agents[t.child].current = t.title;
-      feedLine('spawn', tag(t.requester || HUBCFG.id) + '<span class="arrow">→</span> ' + tag(t.child) + (t.title || ''), fmtClock(t.startedAt || Date.now()));
+    if (status === 'ok') {
+      feedLine('done' + (isCritic ? ' critic' : ''), tag(t.child) + '✅ ' + esc(t.title || 'run') + sharpHtml(t.sharp), fmtClock(t.endedAt || Date.now()), { session: t.session });
+    } else if (status === 'run') {
+      feedLine('spawn', tag(t.requester || HUBCFG.id) + '<span class="arrow">→</span> ' + tag(t.child) + esc(t.title || ''), fmtClock(t.startedAt || Date.now()), { session: t.session });
     } else {
-      L.fail++;
-      setStatus(t.child, 'fail');
-      ST.agents[t.child].current = t.title;
-      feedLine('fail', tag(t.child) + '✕ ' + (t.error || t.status) + ' · ' + (t.title || ''), fmtClock(t.endedAt || Date.now()));
+      feedLine('fail', tag(t.child) + '✕ ' + esc(t.error || t.status) + ' · ' + esc(t.title || ''), fmtClock(t.endedAt || Date.now()), { session: t.session });
     }
   }
-  rebuildLiveTimeline();
-  updateStats();
+  renderLiveView();
   hint.textContent = snap.gatewayOk === false
     ? 'Bridge arriba, pero el gateway no responde — corre: openclaw gateway status'
-    : 'LIVE · escribe una tarea y dale ▶ para despacharla al orquestador';
+    : 'LIVE · escribe una tarea en el composer y despáchala al orquestador';
   setPill(snap.gatewayOk === false ? 'offline' : 'live', snap.gatewayOk === false ? 'SIN GATEWAY' : 'LIVE');
+  if (L.sseWasDown) { toast('Conexión SSE restablecida', 'success'); L.sseWasDown = false; }
 }
 
 function connectLive() {
-  const es = new EventSource('/events');
+  const t = getToken();
+  const url = '/events' + (t ? ('?token=' + encodeURIComponent(t)) : '');
+  const es = new EventSource(url);
   ST.live.es = es;
+  es.onopen = () => {
+    if (ST.live.sseWasDown) { toast('Conexión SSE reconectada', 'success'); ST.live.sseWasDown = false; setPill('live', 'LIVE'); }
+  };
   es.onmessage = (m) => {
+    // mark on ANY received message (incl. the snapshot): a system that only got the
+    // snapshot and then hit a hard SSE close must NOT read as "auth plausible" below.
+    if (!ST.live.firstEventAt) ST.live.firstEventAt = Date.now();
     let evt;
     try { evt = JSON.parse(m.data); } catch { return; }
     if (evt.type === 'snapshot') liveSnapshot(evt);
     else liveHandle(evt);
   };
-  es.onerror = () => { setPill('offline', 'RECONECTANDO'); };
+  es.onerror = () => {
+    // A 401 (or any hard rejection) on the EventSource leaves it CLOSED with NO
+    // auto-retry — the pill would otherwise say "RECONECTANDO" forever. If auth is
+    // plausible (token present, or we never received a single event → likely gated),
+    // prompt for a token via the SAME serialized modal and reconnect with it.
+    if (es.readyState === EventSource.CLOSED) {
+      const authLikely = !!getToken() || ST.live.firstEventAt == null;
+      if (authLikely) {
+        setPill('offline', 'TOKEN REQUERIDO');
+        disconnectLive();
+        askToken('La conexión en vivo (SSE) fue rechazada. Pega un token para reconectar.').then(nt => {
+          if (nt) { setToken(nt); connectLive(); }
+          else { setPill('offline', 'SIN CONEXIÓN'); toast('Conexión en vivo cerrada — sin token', 'error'); }
+        });
+        return;
+      }
+      setPill('offline', 'SIN CONEXIÓN');
+      if (!ST.live.sseWasDown) { ST.live.sseWasDown = true; toast('Conexión SSE cerrada', 'error'); }
+      return;
+    }
+    // transient drop (readyState CONNECTING): the browser keeps retrying on its own
+    setPill('offline', 'RECONECTANDO');
+    if (!ST.live.sseWasDown) { ST.live.sseWasDown = true; toast('Conexión SSE perdida — reintentando…', 'error'); }
+  };
 }
 function disconnectLive() {
   if (ST.live.es) { ST.live.es.close(); ST.live.es = null; }
 }
 async function sendToArchitect(message, sessionKey) {
-  const r = await fetch('/api/run', {
+  const r = await apiFetch('/api/run', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message, agent: HUBCFG.id, sessionKey }),
   });
@@ -595,25 +832,45 @@ async function sendToArchitect(message, sessionKey) {
   if (!out.ok) throw new Error(out.error || '?');
 }
 async function dispatchReal() {
-  const msg = taskIn.value.trim();
-  if (!msg) { taskIn.focus(); return; }
-  runBtn.disabled = true;
+  // legacy header-input dispatch path (kept for safety; header input is demo-only now)
+  const msg = taskIn ? taskIn.value.trim() : '';
+  if (!msg) { if (taskIn) taskIn.focus(); return; }
   try {
     await sendToArchitect(msg);
-    taskIn.value = '';
+    if (taskIn) taskIn.value = '';
+    toast('Tarea despachada', 'success');
   } catch (e) {
-    feedLine('fail', '<span class="tag">[BRIDGE]</span> no pude despachar: ' + e.message);
-  } finally {
-    runBtn.disabled = false;
+    feedLine('fail', '<span class="tag">[BRIDGE]</span> no pude despachar: ' + e.message, undefined, { global: true });
+    toast('No se pudo despachar: ' + e.message, 'error');
   }
 }
 
 /* ============================================================
    COMPOSER (paste text/code/images, dispatch to the hub)
+   The composer is THE single dispatch flow + project switcher source.
    ============================================================ */
 const compEl = $('composer'), compText = $('compText'), compDir = $('compDir'),
-  compImgs = $('compImgs'), compSend = $('compSend');
+  compImgs = $('compImgs'), compSend = $('compSend'),
+  compThread = $('compThread'), compNew = $('compNew'), compRecents = $('compDirRecents');
 const pendingImgs = []; // { name, dataBase64, preview }
+
+function renderRecents() {
+  if (!compRecents) return;
+  compRecents.innerHTML = '';
+  loadRecents().forEach(p => {
+    const o = document.createElement('option');
+    o.value = p.dir;
+    compRecents.appendChild(o);
+  });
+}
+function refreshThreadChip() {
+  if (!compThread || !compDir) return;
+  const dir = compDir.value.trim();
+  if (!dir) { compThread.textContent = ''; compThread.classList.remove('live'); return; }
+  const known = loadRecents().some(p => p.dir === dir);
+  compThread.textContent = known ? 'HILO: ' + projSlug(dir) + ' · continúa donde quedó' : 'HILO NUEVO: ' + projSlug(dir);
+  compThread.classList.toggle('live', known);
+}
 
 function compRenderImgs() {
   compImgs.innerHTML = '';
@@ -639,6 +896,7 @@ function compAddImageFile(file) {
   };
   rd.readAsDataURL(file);
 }
+
 if (compEl) {
   compText.addEventListener('paste', (e) => {
     for (const item of (e.clipboardData?.items || [])) {
@@ -652,52 +910,34 @@ if (compEl) {
       if (evName === 'drop') [...(e.dataTransfer?.files || [])].forEach(compAddImageFile);
     });
   });
-  /* ---- proyectos recientes: cada carpeta = un hilo persistente del architect ---- */
-  const compThread = $('compThread'), compNew = $('compNew'), compRecents = $('compDirRecents');
-  const projSlug = d => 'p-' + d.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(-40);
-  function loadRecents() { try { return JSON.parse(localStorage.getItem('stackops-projects') || '[]'); } catch { return []; } }
-  function saveRecent(dir) {
-    if (!dir) return;
-    const r = loadRecents().filter(p => p.dir !== dir);
-    r.unshift({ dir, last: Date.now() });
-    localStorage.setItem('stackops-projects', JSON.stringify(r.slice(0, 12)));
-    renderRecents();
-  }
-  function renderRecents() {
-    compRecents.innerHTML = '';
-    loadRecents().forEach(p => {
-      const o = document.createElement('option');
-      o.value = p.dir;
-      compRecents.appendChild(o);
-    });
-  }
-  function refreshThreadChip() {
-    const dir = compDir.value.trim();
-    if (!dir) { compThread.textContent = ''; compThread.classList.remove('live'); return; }
-    const known = loadRecents().some(p => p.dir === dir);
-    compThread.textContent = known ? 'HILO: ' + projSlug(dir) + ' · continúa donde quedó' : 'HILO NUEVO: ' + projSlug(dir);
-    compThread.classList.toggle('live', known);
-  }
+
   compDir.value = localStorage.getItem('stackops-projectdir') || '';
   compDir.addEventListener('change', () => { localStorage.setItem('stackops-projectdir', compDir.value.trim()); refreshThreadChip(); });
   compDir.addEventListener('input', refreshThreadChip);
   renderRecents();
   refreshThreadChip();
 
+  // "↺ Nueva conv." — reset the architect thread for this project AND clear its view (bug 1)
   compNew.addEventListener('click', async () => {
     const dir = compDir.value.trim();
-    if (!dir) { feedLine('sys', '<span class="tag">[COMPOSER]</span> pon la carpeta del proyecto para resetear SU conversación'); return; }
+    if (!dir) { toast('Pon la carpeta del proyecto para resetear su conversación', 'info'); return; }
     if (!confirm('¿Resetear la conversación del architect para este proyecto?\n' + dir + '\n\n(El hook session-memory guarda un resumen antes de limpiar.)')) return;
+    const slug = projSlug(dir);
     try {
-      await sendToArchitect('/new', projSlug(dir));
-      feedLine('sys', '<span class="tag">[COMPOSER]</span> conversación de ' + projSlug(dir) + ' reseteada');
+      await sendToArchitect('/new', slug);
+      // wipe this project's feed + tasks so the view starts clean
+      ST.feedLog = ST.feedLog.filter(e => e.session !== slug);
+      for (const [k, t] of ST.live.tasks) { if ((t.session || null) === slug) ST.live.tasks.delete(k); }
+      if (ST.mode === 'live') renderLiveView();
+      feedLine('sys', '<span class="tag">[COMPOSER]</span> conversación de ' + slug + ' reseteada · vista limpia', undefined, { global: true });
+      toast('Conversación reseteada · vista limpia', 'success');
     } catch (e) {
-      feedLine('fail', '<span class="tag">[COMPOSER]</span> ' + e.message);
+      toast('No se pudo resetear: ' + e.message, 'error');
     }
   });
 
   async function compDispatch() {
-    if (ST.mode !== 'live') { feedLine('sys', '<span class="tag">[COMPOSER]</span> cambia a modo LIVE para despachar de verdad'); return; }
+    if (ST.mode !== 'live') { toast('Cambia a modo LIVE para despachar de verdad', 'info'); return; }
     const text = compText.value.trim();
     const dir = compDir.value.trim();
     if (!text && !pendingImgs.length) { compText.focus(); return; }
@@ -707,7 +947,7 @@ if (compEl) {
       // upload images first so file-reading runtimes can open them
       const savedPaths = [];
       for (const im of pendingImgs) {
-        const r = await fetch('/api/upload', {
+        const r = await apiFetch('/api/upload', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ name: im.name, dataBase64: im.dataBase64, dir: dir || undefined }),
         });
@@ -724,14 +964,16 @@ if (compEl) {
       // Per-project session: each project folder gets its own persistent architect thread.
       const sessionKey = dir ? projSlug(dir) : undefined;
       await sendToArchitect(message, sessionKey);
-      if (dir) saveRecent(dir);
+      if (dir) { saveRecentDir(dir); renderRecents(); setProject(dir); } // add + activate the project
       refreshThreadChip();
       compText.value = '';
       pendingImgs.length = 0;
       compRenderImgs();
-      feedLine('sys', '<span class="tag">[COMPOSER]</span> tarea despachada' + (savedPaths.length ? ' con ' + savedPaths.length + ' imagen(es)' : ''));
+      feedLine('sys', '<span class="tag">[COMPOSER]</span> tarea despachada' + (savedPaths.length ? ' con ' + savedPaths.length + ' imagen(es)' : ''), undefined, { session: sessionKey || null, global: !sessionKey });
+      toast('Tarea despachada' + (savedPaths.length ? ' (+' + savedPaths.length + ' img)' : ''), 'success');
     } catch (e) {
-      feedLine('fail', '<span class="tag">[COMPOSER]</span> ' + e.message);
+      feedLine('fail', '<span class="tag">[COMPOSER]</span> ' + e.message, undefined, { global: true });
+      toast('No se pudo despachar: ' + e.message, 'error');
     } finally {
       compSend.disabled = false;
       compSend.textContent = '▶ Despachar al ARCHITECT';
@@ -741,6 +983,43 @@ if (compEl) {
   compText.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); compDispatch(); }
   });
+}
+
+/* ============================================================
+   PROJECT SELECTOR (header) — synced with the composer folder
+   ============================================================ */
+function renderProjectSelector() {
+  const sel = $('projectSel');
+  if (!sel) return;
+  const recents = loadRecents();
+  const cur = ST.project ? ST.project.dir : '__global__';
+  sel.innerHTML = '';
+  const g = document.createElement('option');
+  g.value = '__global__'; g.textContent = '◎ GLOBAL · todo';
+  sel.appendChild(g);
+  recents.forEach(p => {
+    const o = document.createElement('option');
+    o.value = p.dir;
+    const base = p.dir.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p.dir;
+    o.textContent = '▪ ' + base;
+    o.title = p.dir + ' · ' + projSlug(p.dir);
+    sel.appendChild(o);
+  });
+  sel.value = (cur === '__global__' || recents.some(p => p.dir === cur)) ? cur : '__global__';
+}
+// switch the active project (or GLOBAL); syncs composer + re-renders the live view
+function setProject(dirOrGlobal) {
+  if (!dirOrGlobal || dirOrGlobal === '__global__') {
+    ST.project = null;
+    localStorage.setItem('stackops-activeproject', '');
+  } else {
+    ST.project = { dir: dirOrGlobal, slug: projSlug(dirOrGlobal) };
+    localStorage.setItem('stackops-activeproject', dirOrGlobal);
+    if (compDir) { compDir.value = dirOrGlobal; localStorage.setItem('stackops-projectdir', dirOrGlobal); }
+  }
+  renderProjectSelector();
+  refreshThreadChip();
+  if (ST.mode === 'live') renderLiveView();
 }
 
 /* ============================================================
@@ -1005,6 +1284,7 @@ function loadScript(s) {
     });
     ALL.forEach(id => { if (tlRows[id] && !ST.script.involved.includes(id)) tlRows[id].dataset.st = 'skip'; });
   }
+  ST.feedLog = [];
   feed.innerHTML = '';
   feedLine('sys', '<span class="tag">[ARCH]</span> Plan cargado: «' + s.task + '» · ' + s.involved.length + ' capas');
   setPill('ready', 'PLAN LISTO');
@@ -1046,32 +1326,43 @@ function setPill(st, txt) { pill.dataset.st = st; pillTxt.textContent = txt; }
 function setMode(mode) {
   if (ST.mode === mode) return;
   ST.mode = mode;
-  localStorage.setItem('stackops-mode', mode);
-  $('modeLive').classList.toggle('on', mode === 'live');
-  $('modeDemo').classList.toggle('on', mode === 'demo');
-  $('chips').classList.toggle('hidden', mode === 'live');
+  const live = mode === 'live';
+
+  // header: demo controls + chips only in demo; project selector + fleet only in live
+  const dctl = $('demoCtl'); if (dctl) dctl.hidden = live;
+  $('chips').hidden = live;
+  const pw = $('projectWrap'); if (pw) pw.hidden = !live;
+  const fl = $('fleet'); if (fl) fl.style.display = live ? '' : 'none';
+  const dl = $('demoLink');
+  if (dl) { dl.textContent = live ? 'modo demo' : '← volver a LIVE'; dl.href = live ? '?demo=1' : location.pathname; }
+
   const comp = $('composer');
-  if (comp) comp.classList.toggle('demo-disabled', mode !== 'live');
-  speedSel.style.display = mode === 'live' ? 'none' : '';
-  pauseBtn.style.display = mode === 'live' ? 'none' : '';
-  resetBtn.style.display = mode === 'live' ? 'none' : '';
-  runBtn.textContent = mode === 'live' ? '▶ Despachar' : '▶ Ejecutar';
-  taskIn.placeholder = mode === 'live'
-    ? 'Tarea REAL para el orquestador (se despacha vía openclaw agent)…'
-    : 'Escribe una tarea… ej: agregar login y proteger la API';
+  if (comp) comp.classList.toggle('demo-disabled', !live);
+  // (demo-only header controls live inside #demoCtl now; these toggles are harmless)
+  if (speedSel) speedSel.style.display = live ? 'none' : '';
+  if (pauseBtn) pauseBtn.style.display = live ? 'none' : '';
+  if (resetBtn) resetBtn.style.display = live ? 'none' : '';
+  if (runBtn) runBtn.textContent = live ? '▶ Despachar' : '▶ Ejecutar';
+
+  if (!live) ST.project = null; // demo has no per-project sessions
+  renderProjectSelector();
+
   ST.agents = freshAgents();
   Object.keys(AG).forEach(id => setStatus(id, 'idle'));
   clearTimelineBars();
+  ST.feedLog = [];
   feed.innerHTML = '';
   particles = [];
   ST.script = null; ST.running = false; ST.finished = false;
   ST.live.tasks = new Map(); ST.live.spawns = 0; ST.live.ok = 0; ST.live.fail = 0; ST.live.t0 = null;
   setStatLabels();
-  if (mode === 'live') {
+  if (live) {
     setPill('live', 'CONECTANDO');
     hint.textContent = 'Conectando al bridge…';
     hint.classList.remove('off');
-    runBtn.disabled = false; pauseBtn.disabled = true; resetBtn.disabled = true;
+    if (runBtn) runBtn.disabled = false;
+    if (pauseBtn) pauseBtn.disabled = true;
+    if (resetBtn) resetBtn.disabled = true;
     connectLive();
   } else {
     disconnectLive();
@@ -1082,9 +1373,6 @@ function setMode(mode) {
     markChip();
   }
 }
-
-$('modeLive').addEventListener('click', () => setMode('live'));
-$('modeDemo').addEventListener('click', () => setMode('demo'));
 
 /* ============================================================
    FLEET CONTROL — modelo + effort de toda la flota
@@ -1098,7 +1386,7 @@ function fleetMarkDirty() {
 }
 async function fleetLoad() {
   try {
-    const r = await fetch('/api/fleet');
+    const r = await apiFetch('/api/fleet');
     const f = await r.json();
     if (!f.ok) return;
     fleetCurrent = { model: f.model, thinking: f.thinking };
@@ -1109,7 +1397,7 @@ async function fleetLoad() {
     if (f.model) fleetModel.value = f.model;
     if (f.thinking) fleetThinking.value = f.thinking;
     fleetMarkDirty();
-  } catch { /* demo mode / no bridge */ }
+  } catch { /* demo mode / no bridge / token declined */ }
 }
 fleetModel.addEventListener('change', fleetMarkDirty);
 fleetThinking.addEventListener('change', fleetMarkDirty);
@@ -1118,29 +1406,30 @@ fleetApply.addEventListener('click', async () => {
   if (model === fleetCurrent.model && thinking === fleetCurrent.thinking) return;
   let warn = 'Cambiar TODA la flota (28 agentes) a:\n\n  modelo: ' + model.split('/').pop() + '\n  effort: ' + thinking + '\n\nEsto REINICIA el gateway.';
   try {
-    const st = await (await fetch('/api/fleet')).json();
+    const st = await (await apiFetch('/api/fleet')).json();
     if (st.running > 0) warn += '\n\n⚠ HAY ' + st.running + ' TAREA(S) CORRIENDO — el reinicio las puede matar.';
   } catch { /* noop */ }
   if (model.includes('fable')) warn += '\n\n⚠ Fable 5: experimental en OpenClaw 2026.6.1 — verifica el primer run.';
   if (!confirm(warn)) return;
   fleetApply.disabled = true; fleetApply.textContent = '… aplicando';
   try {
-    const r = await fetch('/api/fleet', {
+    const r = await apiFetch('/api/fleet', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model, thinking }),
     });
     const out = await r.json();
     if (!out.ok) throw new Error(out.error || '?');
     fleetCurrent = { model, thinking };
-    feedLine('sys', '<span class="tag">[FLOTA]</span> ✅ ' + model.split('/').pop() + ' · effort ' + thinking + ' · gateway reiniciado');
+    feedLine('sys', '<span class="tag">[FLOTA]</span> ✅ ' + model.split('/').pop() + ' · effort ' + thinking + ' · gateway reiniciado', undefined, { global: true });
+    toast('Flota → ' + model.split('/').pop() + ' · effort ' + thinking, 'success');
   } catch (e) {
-    feedLine('fail', '<span class="tag">[FLOTA]</span> ' + e.message);
+    feedLine('fail', '<span class="tag">[FLOTA]</span> ' + e.message, undefined, { global: true });
+    toast('No se pudo aplicar a la flota: ' + e.message, 'error');
   } finally {
     fleetApply.disabled = false;
     fleetMarkDirty();
   }
 });
-fleetLoad();
 
 /* ---------- chips / controls ---------- */
 function markChip() {
@@ -1180,10 +1469,37 @@ resetBtn.addEventListener('click', () => {
 speedSel.addEventListener('change', () => { ST.speed = parseFloat(speedSel.value); });
 taskIn.addEventListener('keydown', e => { if (e.key === 'Enter') (ST.mode === 'live' ? dispatchReal() : demoStart()); });
 
+/* ---------- mobile: collapsible radial map ---------- */
+const graphToggle = $('graphToggle');
+function isMobile() { return window.matchMedia('(max-width:1120px)').matches; }
+function setGraphCollapsed(collapsed) {
+  const g = document.querySelector('.grid');
+  g.classList.toggle('gcollapsed', collapsed);
+  if (graphToggle) {
+    graphToggle.setAttribute('aria-expanded', String(!collapsed));
+    graphToggle.textContent = collapsed ? '▤ Mostrar mapa de la flota' : '▤ Ocultar mapa de la flota';
+  }
+  if (!collapsed) requestAnimationFrame(() => layout());
+}
+if (graphToggle) {
+  graphToggle.addEventListener('click', () => {
+    const g = document.querySelector('.grid');
+    setGraphCollapsed(!g.classList.contains('gcollapsed'));
+  });
+}
+
 let rzPend = false;
 window.addEventListener('resize', () => {
   if (rzPend) return; rzPend = true;
-  requestAnimationFrame(() => { layout(); rzPend = false; });
+  requestAnimationFrame(() => {
+    // leaving mobile width expands the map — go through setGraphCollapsed so the
+    // toggle's aria-expanded + label stay in sync with the actual state.
+    if (!isMobile() && document.querySelector('.grid').classList.contains('gcollapsed')) {
+      setGraphCollapsed(false);
+    }
+    layout();
+    rzPend = false;
+  });
 });
 
 /* ---------- main loop ---------- */
@@ -1232,17 +1548,46 @@ layout();
 setStatLabels();
 requestAnimationFrame(loop);
 
-// default mode: LIVE if the bridge responds, else DEMO
+// project selector + token modal wiring
+renderProjectSelector();
+$('projectSel')?.addEventListener('change', e => setProject(e.target.value));
+$('modalOk')?.addEventListener('click', () => closeModal($('modalInput').value.trim()));
+$('modalCancel')?.addEventListener('click', () => closeModal(null));
+$('modalInput')?.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); closeModal($('modalInput').value.trim()); } });
+
+// collapse the radial map by default on phones (feed-first)
+if (isMobile()) setGraphCollapsed(true);
+
+// default mode: ALWAYS live. DEMO only behind ?demo=1.
 (async () => {
-  const saved = localStorage.getItem('stackops-mode');
+  const params = new URLSearchParams(location.search);
+  if (params.get('demo') === '1') { setMode('demo'); return; }
+
+  // restore the previously active project (filters the live view). If the saved
+  // project is no longer in recents, the selector falls back to GLOBAL while
+  // ST.project would keep filtering by a slug not shown — feed looks empty for no
+  // reason. Reset to GLOBAL and clear the stale persistence so view + filter agree.
+  const savedProj = localStorage.getItem('stackops-activeproject') || '';
+  if (savedProj && loadRecents().some(p => p.dir === savedProj)) {
+    ST.project = { dir: savedProj, slug: projSlug(savedProj) };
+  } else {
+    ST.project = null;
+    if (savedProj) localStorage.setItem('stackops-activeproject', '');
+  }
+  renderProjectSelector();
+
   try {
-    const r = await fetch('/api/state', { signal: AbortSignal.timeout(2500) });
+    const r = await apiFetch('/api/state', { signal: AbortSignal.timeout(4000) });
     if (!r.ok) throw new Error('no bridge');
     await r.json();
-    setMode(saved === 'demo' ? 'demo' : 'live');
+    setMode('live');
+    fleetLoad();
     $('footStatus').textContent = 'bridge ok · ' + location.host;
-  } catch {
-    setMode('demo');
-    feedLine('sys', '<span class="tag">[BRIDGE]</span> sin bridge — modo DEMO (corre "node server.js" para datos reales)');
+  } catch (e) {
+    // stay in LIVE even if the bridge is down (the SSE layer keeps retrying)
+    setMode('live');
+    fleetLoad();
+    $('footStatus').textContent = 'sin bridge · ' + location.host;
+    hint.textContent = 'No hay bridge — corre "node server.js" para datos reales';
   }
 })();
