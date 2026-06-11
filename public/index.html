@@ -110,6 +110,23 @@
     </aside>
 
     <section class="stage" id="stage">
+      <div class="stage-bg">
+        <svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%">
+          <defs>
+            <linearGradient id="gridGlow" x1="0" y1="0" x2="0" y2="100%">
+              <stop offset="0%" stop-color="rgba(10, 10, 11, 0)"/>
+              <stop offset="50%" stop-color="rgba(10, 10, 11, 0.2)"/>
+              <stop offset="100%" stop-color="rgba(56, 217, 255, 0.16)"/>
+            </linearGradient>
+            <pattern id="dotGrid" width="30" height="30" patternUnits="userSpaceOnUse">
+              <circle cx="1.5" cy="1.5" r="0.85" fill="#38d9ff" opacity="0.15"/>
+              <path d="M 30 0 L 0 0 0 30" fill="none" stroke="rgba(91, 184, 224, 0.05)" stroke-width="0.75"/>
+            </pattern>
+          </defs>
+          <rect width="100%" height="100%" fill="url(#dotGrid)"/>
+          <rect width="100%" height="100%" fill="url(#gridGlow)"/>
+        </svg>
+      </div>
       <svg id="net" xmlns="http://www.w3.org/2000/svg"></svg>
       <canvas id="fx"></canvas>
       <div class="legend" id="legend"></div>

@@ -483,6 +483,12 @@ function setStatus(id, st) {
     rosterEls[id].dataset.st = st;
     rosterEls[id].querySelector('.stx').textContent = STATUS_TXT[st] || '·';
   }
+  // Propagar estado a las lineas del grafo (spokes y clinks)
+  const spoke = net.querySelector('.spoke[data-a="' + id + '"]');
+  if (spoke) spoke.dataset.st = st;
+  const clink = net.querySelector('.clink[data-c="' + id + '"]');
+  if (clink) clink.dataset.st = st;
+
   if (ST.selected === id) renderAgentPanel(id);
 }
 function setSharp(specId, sh) {
