@@ -78,6 +78,11 @@ The bridge polls `openclaw tasks list --json`, diffs task state, parses agent id
 
 Anything that speaks this shape can feed the UI â€” the simulator uses the exact same contract. The contract is additive-only: new fields may appear, existing ones never change shape.
 
+Per-project **conversation history** comes from a different source: the agent's
+own session transcript on disk (`GET /api/conversation`, below), not the event
+ring. The ring is the live orchestration feed; the transcript is the actual
+back-and-forth of a project thread.
+
 ## HTTP API
 
 All routes below live under `/api/*` and are therefore covered by the
@@ -137,6 +142,39 @@ and errors on failure), restarts the gateway (90s timeout), and pushes a Spanish
 
 Unknown `<id>` â†’ `404`. The endpoint restarts the gateway itself; surfacing the
 `running` count from the GET so the UI can warn about active tasks is the UI's job.
+
+### Conversation history
+
+`GET /api/conversation?session=<p-slug>&agent=<id>` â€” the conversation of one
+project thread, read from the agent's session transcript (`.jsonl`) on disk:
+
+```jsonc
+{ "ok": true, "session": "p-c-work-barcelona", "agent": "architect",
+  "turns": [
+    { "role": "user",      "text": "Â¿estado del proyecto?", "t": 1781230800000 },
+    { "role": "assistant", "text": "Todo en marcha.",        "t": 1781230805000 }
+  ],
+  "truncated": false }
+```
+
+- `session` *(required)* â€” validated against `^p-[a-z0-9-]+$` â†’ otherwise `400`.
+- `agent` *(optional, default `architect`)* â€” sanitized to `[a-zA-Z0-9_-]`.
+- Resolution: reads `%USERPROFILE%\.openclaw\agents\<agent>\sessions\sessions.json`,
+  looks up the key `agent:<agent>:<session>`, and uses its `sessionFile` (or
+  `<sessionId>.jsonl` in the same folder). After `/new` the entry already points
+  at the fresh transcript, so you get the **current** conversation.
+- Unknown key or missing transcript â†’ `200 { "ok": true, "session", "turns": [], "truncated": false }` (**not** an error).
+- `turns` are in chronological file order. `t` is the entry timestamp in epoch ms
+  (`null` when absent/unparseable). `role` is only `user` or `assistant`.
+- **Noise filtered out** (these never appear as turns): user turns that are
+  runtime events â€” starting with `A background task completed`, or containing
+  `<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>` or `[Inter-session message]`; and
+  assistant turns that are exactly `NO_REPLY` or empty.
+- **Caps**: at most the last **100** turns (`truncated: true` when older turns were
+  dropped); each turn's `text` is capped at **8000** chars (`â€¦` appended). The
+  transcript file is read whole up to **10 MB** (~500 KB is normal); larger files
+  are tail-read, keeping the most recent turns. A corrupt JSON line is skipped,
+  not fatal.
 
 ### SITREP (AI narrator, `STACKOPS_NARRATOR_MODEL`, default `haiku`)
 

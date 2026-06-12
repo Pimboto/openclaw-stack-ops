@@ -522,6 +522,116 @@ function generateSitrep() {
   });
 }
 
+/* ------------------- conversation history (F4) -------------------- */
+
+// Per-project conversation = the agent's session transcript (.jsonl), NOT the
+// event ring. We map the short project session ("p-<slug>") to the agent's
+// sessions.json entry, read the current transcript, and normalize it to turns.
+// Two pure helpers (parseConversationJsonl / resolveSessionFile) are exported so
+// the feature can be tested by `require('./server.js')` WITHOUT opening the port.
+
+const CONV_MAX_TURNS = 100;            // keep only the most recent N turns
+const CONV_MAX_TURN_CHARS = 8000;      // per-turn text cap (huge dumps get '…')
+const CONV_MAX_FILE_BYTES = 10 * 1024 * 1024; // ~500KB is normal; tail-read past 10MB
+
+// Per-agent sessions directory: %USERPROFILE%\.openclaw\agents\<agent>\sessions.
+function agentSessionsDir(agent) {
+  const home = process.env.USERPROFILE || process.env.HOME || '';
+  return path.join(home, '.openclaw', 'agents', agent, 'sessions');
+}
+
+// Join the text blocks of a transcript message. content is either an array of
+// `{type:'text', text}` blocks (other block types ignored) or a plain string.
+function conversationTurnText(content) {
+  if (Array.isArray(content)) {
+    return content
+      .filter(c => c && c.type === 'text' && typeof c.text === 'string')
+      .map(c => c.text)
+      .join('');
+  }
+  return typeof content === 'string' ? content : '';
+}
+
+// Runtime-internal user turns that aren't real conversation: background-task
+// announce prompts, injected context blocks, inter-session relays.
+function isConversationUserNoise(text) {
+  return /^A background task completed/.test(text)
+    || text.includes('<<<BEGIN_OPENCLAW_INTERNAL_CONTEXT>>>')
+    || text.includes('[Inter-session message]');
+}
+
+// Parse a transcript's raw text into chronological turns. Pure + side-effect
+// free: one JSON object per line, tolerant of a corrupt line (skipped), filters
+// runtime noise + NO_REPLY/empty assistant turns, caps per-turn length, and keeps
+// only the last CONV_MAX_TURNS (truncated=true when it trimmed).
+function parseConversationJsonl(rawText, opts) {
+  const maxTurns = (opts && opts.maxTurns) || CONV_MAX_TURNS;
+  const maxChars = (opts && opts.maxTurnChars) || CONV_MAX_TURN_CHARS;
+  const turns = [];
+  const lines = String(rawText || '').split(/\r?\n/);
+  for (const ln of lines) {
+    if (!ln) continue;
+    let o;
+    try { o = JSON.parse(ln); } catch { continue; } // corrupt line → parse the rest
+    const m = (o && o.message) || o;
+    if (!m || (m.role !== 'user' && m.role !== 'assistant')) continue;
+    let text = conversationTurnText(m.content).trim();
+    if (m.role === 'user' && isConversationUserNoise(text)) continue;
+    if (m.role === 'assistant' && text === 'NO_REPLY') continue;
+    if (!text) continue;
+    // t = epoch ms (null when the timestamp is missing or unparseable).
+    const parsed = o && o.timestamp ? Date.parse(o.timestamp) : NaN;
+    const t = Number.isNaN(parsed) ? null : parsed;
+    if (text.length > maxChars) text = text.slice(0, maxChars - 1) + '…';
+    turns.push({ role: m.role, text, t });
+  }
+  let truncated = false;
+  if (turns.length > maxTurns) {
+    turns.splice(0, turns.length - maxTurns); // keep the most recent N
+    truncated = true;
+  }
+  return { turns, truncated };
+}
+
+// Resolve a project session to its current transcript file on disk, or null when
+// the agent/key/file is absent (caller turns null into an empty-history 200, not
+// an error). Prefers the absolute sessionFile from sessions.json; falls back to
+// "<sessionId>.jsonl" in the same folder. After "/new" sessions.json already
+// points at the fresh sessionId, so we naturally read the current conversation.
+function resolveSessionFile(agent, session) {
+  const cleanAgent = String(agent || 'architect').replace(/[^a-zA-Z0-9_-]/g, '') || 'architect';
+  const dir = agentSessionsDir(cleanAgent);
+  let map;
+  try { map = JSON.parse(fs.readFileSync(path.join(dir, 'sessions.json'), 'utf8')); }
+  catch { return null; } // no/unreadable sessions.json → nothing to resolve
+  const entry = (map && typeof map === 'object') ? map[`agent:${cleanAgent}:${session}`] : null;
+  if (!entry || typeof entry !== 'object') return null;
+  let file = (typeof entry.sessionFile === 'string' && entry.sessionFile) ? entry.sessionFile : null;
+  if (!file && entry.sessionId) file = path.join(dir, `${entry.sessionId}.jsonl`);
+  if (!file) return null;
+  try { if (!fs.statSync(file).isFile()) return null; } catch { return null; }
+  return file;
+}
+
+// Read a transcript defensively. Normal files (~500KB) are read whole; a file
+// past CONV_MAX_FILE_BYTES is tail-read (we keep only the last N turns anyway,
+// and parseConversationJsonl drops the partial first line via its per-line catch).
+function readConversationRaw(file) {
+  let stat;
+  try { stat = fs.statSync(file); } catch { return ''; }
+  if (stat.size <= CONV_MAX_FILE_BYTES) {
+    try { return fs.readFileSync(file, 'utf8'); } catch { return ''; }
+  }
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(CONV_MAX_FILE_BYTES);
+    fs.readSync(fd, buf, 0, CONV_MAX_FILE_BYTES, stat.size - CONV_MAX_FILE_BYTES);
+    return buf.toString('utf8');
+  } catch { return ''; }
+  finally { if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* noop */ } } }
+}
+
 /* ------------------------------ http ------------------------------ */
 
 const MIME = {
@@ -867,20 +977,48 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  /* --- F4: conversation history (per-project transcript) --- */
+  if (url === '/api/conversation' && req.method === 'GET') {
+    try {
+      let params;
+      try { params = new URLSearchParams(req.url.split('?')[1] || ''); }
+      catch { return json(res, 400, { ok: false, error: 'query inválida' }); }
+      const session = (params.get('session') || '').trim();
+      if (!PROJECT_SESSION_RE.test(session)) {
+        return json(res, 400, { ok: false, error: 'parámetro session inválido' });
+      }
+      const agent = (params.get('agent') || 'architect').replace(/[^a-zA-Z0-9_-]/g, '') || 'architect';
+      const file = resolveSessionFile(agent, session);
+      // Unknown key or missing transcript → empty history (not an error).
+      if (!file) return json(res, 200, { ok: true, session, agent, turns: [], truncated: false });
+      const { turns, truncated } = parseConversationJsonl(readConversationRaw(file));
+      return json(res, 200, { ok: true, session, agent, turns, truncated });
+    } catch (err) {
+      return json(res, httpCode(err), { ok: false, error: String(err.message || err) });
+    }
+  }
+
   serveStatic(req, res);
 });
 
 /* ------------------------------ boot ------------------------------ */
 
-server.listen(PORT, HOST, () => {
-  log(`OpenClaw Stack Ops → http://${HOST}:${PORT}`);
-  log(`bridge: "${BIN}" · poll cada ${POLL_MS}ms`);
-  log(AUTH_ON
-    ? 'auth: ACTIVA (STACKOPS_TOKEN) — /api/* y /events exigen token'
-    : 'auth: desactivada — solo para uso local (127.0.0.1)');
-  poll();
-  setInterval(poll, POLL_MS);
-  setInterval(() => {
-    for (const res of sseClients) { try { res.write(': hb\n\n'); } catch { /* noop */ } }
-  }, 25000);
-});
+// Only open the port / start polling when run as a program. `require('./server.js')`
+// (e.g. tools/test-conversation.js) gets the pure helpers below WITHOUT side effects.
+if (require.main === module) {
+  server.listen(PORT, HOST, () => {
+    log(`OpenClaw Stack Ops → http://${HOST}:${PORT}`);
+    log(`bridge: "${BIN}" · poll cada ${POLL_MS}ms`);
+    log(AUTH_ON
+      ? 'auth: ACTIVA (STACKOPS_TOKEN) — /api/* y /events exigen token'
+      : 'auth: desactivada — solo para uso local (127.0.0.1)');
+    poll();
+    setInterval(poll, POLL_MS);
+    setInterval(() => {
+      for (const res of sseClients) { try { res.write(': hb\n\n'); } catch { /* noop */ } }
+    }, 25000);
+  });
+}
+
+// Pure feature functions exported for the runner-less test (tools/test-conversation.js).
+module.exports = { parseConversationJsonl, resolveSessionFile };

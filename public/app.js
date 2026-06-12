@@ -33,7 +33,7 @@ AG[HUBCFG.id] = { ...HUBCFG, g: 'build', isHub: true, isCritic: false };
 
 /* ---------- dom ---------- */
 const $ = id => document.getElementById(id);
-const stage = $('stage'), net = $('net'), fx = $('fx'), feed = $('feed'), roster = $('roster');
+const stage = $('stage'), net = $('net'), fx = $('fx'), feed = $('feed'), roster = $('roster'), conv = $('conv');
 const agentP = $('agentP'), hint = $('hint'), pill = $('pill'), pillTxt = $('pillTxt');
 const tlWrap = $('tlWrap'), playhead = $('playhead');
 const runBtn = $('run'), pauseBtn = $('pause'), resetBtn = $('reset'), speedSel = $('speed'), taskIn = $('task');
@@ -207,6 +207,10 @@ function reInitAfterAuth() {
   fleetLoad();
   sitrepAuthPaused = false;
   if (!sitrepDisabled) startSitrepPoll();
+  // recover the active project's conversation if its load was left degraded by the
+  // pre-token boot (error) or never started (idle) — otherwise the CONV tab stays stuck.
+  const slug = curSlug();
+  if (slug) { const e = convEntry(slug); if (e.status === 'error' || e.status === 'idle') loadConversation(slug, { force: true }); }
 }
 
 /* ---- toasts ---- */
@@ -576,14 +580,22 @@ function renderAgentPanel(id) {
   const mc = $('agModelChip'); if (mc) mc.addEventListener('click', (ev) => openModelPicker(id, ev.currentTarget));
 }
 function showTab(which) {
-  const tf = $('tabFeed'), ta = $('tabAgent');
+  const tf = $('tabFeed'), ta = $('tabAgent'), tc = $('tabConv');
+  [tf, ta, tc].forEach(b => b && b.classList.remove('on'));
+  agentP.classList.remove('on');
+  if (conv) conv.classList.remove('on');
+  feed.style.display = 'none';
   if (which === 'agent') {
     if (!ST.selected) renderAgentEmpty();
-    ta.classList.add('on'); tf.classList.remove('on');
-    agentP.classList.add('on'); feed.style.display = 'none';
+    if (ta) ta.classList.add('on');
+    agentP.classList.add('on');
+  } else if (which === 'conv') {
+    if (tc) tc.classList.add('on');
+    if (conv) conv.classList.add('on');
+    ensureConvLoaded();
   } else {
-    tf.classList.add('on'); ta.classList.remove('on');
-    agentP.classList.remove('on'); feed.style.display = 'flex';
+    if (tf) tf.classList.add('on');
+    feed.style.display = 'flex';
   }
 }
 function renderAgentEmpty() {
@@ -597,6 +609,211 @@ function renderAgentEmpty() {
 }
 $('tabFeed').addEventListener('click', () => showTab('feed'));
 $('tabAgent').addEventListener('click', () => showTab('agent'));
+$('tabConv') && $('tabConv').addEventListener('click', () => showTab('conv'));
+
+/* ============================================================
+   CONVERSATION (/CONVERSACIÓN) — per-project usuaria ↔ architect thread.
+   Source of truth: GET /api/conversation?session=<slug> (default agent
+   architect). Cached per slug in memory so alternating tabs doesn't
+   refetch; switching INTO a project (setProject) force-refetches, as does
+   the manual refresh and the architect's done/fail event from the hub.
+   Turn text comes from transcripts → ALWAYS rendered via textContent.
+   ============================================================ */
+const CONV = {};                 // slug -> { turns, truncated, status, error, expanded:Set, pending:[] }
+const CONV_COLLAPSE_LEN = 600;   // collapse turns longer than this behind "ver más"
+let _convDebounce = null;        // coalesces hub-driven refetches
+
+function convEntry(slug) {
+  if (!CONV[slug]) CONV[slug] = { turns: [], truncated: false, status: 'idle', error: null, expanded: new Set(), pending: [] };
+  return CONV[slug];
+}
+
+// fetch + normalize the transcript for a slug. Replaces turns only on success;
+// on error the previous turns/pending stay visible under an error banner.
+async function loadConversation(slug, opts = {}) {
+  if (!slug || ST.mode !== 'live') return;
+  const e = convEntry(slug);
+  if (e.status === 'loading') {
+    // a force arriving mid-flight (e.g. the debounced architect-done refetch) must not
+    // be silently dropped: queue it so we re-run once the in-flight fetch resolves.
+    if (opts.force) e.refetchQueued = true;
+    return;
+  }
+  if (e.status === 'ok' && !opts.force) { if (curSlug() === slug) renderConv(); return; }
+  e.status = 'loading'; e.error = null; e.refetchQueued = false;
+  if (curSlug() === slug) renderConv();
+  try {
+    // timeout the fetch so a hung request can't leave status:'loading' permanently
+    // (which would make every future loadConversation() early-return forever). Pass the
+    // signal on the FIRST attempt only — apiFetch strips it from the post-modal retry.
+    const r = await apiFetch('/api/conversation?session=' + encodeURIComponent(slug) + '&agent=' + encodeURIComponent(HUBCFG.id), { signal: AbortSignal.timeout(15000) });
+    if (r.status === 400) {
+      let msg = 'sesión inválida';
+      try { const d = await r.json(); if (d && d.error) msg = d.error; } catch { /* non-json */ }
+      throw new Error(msg);
+    }
+    const d = await r.json();
+    if (!d || !d.ok) throw new Error((d && d.error) || 'respuesta inválida del bridge');
+    const turns = (Array.isArray(d.turns) ? d.turns : [])
+      .filter(t => t && (t.role === 'user' || t.role === 'assistant'))
+      .map(t => ({ role: t.role, text: String(t.text == null ? '' : t.text), t: (typeof t.t === 'number' && isFinite(t.t)) ? t.t : null }));
+    e.turns = turns;
+    e.truncated = !!d.truncated;
+    e.status = 'ok'; e.error = null; e.expanded = new Set();
+    // clear optimistic turns now reflected by the server. confirmPending (the
+    // architect-done refetch) clears all — the run finished, so the user message is
+    // surely in the transcript. Otherwise containment-match: the dispatched message
+    // embeds the user's text, so the server turn contains the optimistic text.
+    if (e.pending.length) {
+      if (opts.confirmPending) e.pending = [];
+      else {
+        const recent = turns.filter(t => t.role === 'user').slice(-6).map(t => t.text);
+        e.pending = e.pending.filter(p => { const pt = p.text.trim(); return pt && !recent.some(rt => rt.includes(pt)); });
+      }
+    }
+  } catch (err) {
+    e.status = 'error';
+    e.error = (err && err.message) ? err.message : 'no se pudo cargar';
+  }
+  if (curSlug() === slug) renderConv();
+  // a force queued while this fetch was in flight: honour it once now that we're free.
+  if (e.refetchQueued) { e.refetchQueued = false; loadConversation(slug, { force: true }); }
+}
+
+// lazy load when the tab is opened (uses cache if already fetched)
+function ensureConvLoaded() {
+  renderConv();
+  const slug = curSlug();
+  if (!slug) return;
+  const e = convEntry(slug);
+  if (e.status === 'idle') loadConversation(slug);
+}
+
+// optimistic user turn on dispatch — shown with a subtle pending marker
+function convAddOptimistic(slug, text) {
+  if (!slug || !text) return;
+  const e = convEntry(slug);
+  e.pending.push({ role: 'user', text: String(text), t: Date.now(), pending: true });
+  if (curSlug() === slug) renderConv();
+}
+
+// the architect finished a turn for <slug>: refetch if active (debounced), else
+// mark stale so the next visit to that project reloads fresh.
+function onArchitectTurnDone(slug) {
+  if (!slug) return;
+  if (curSlug() === slug) {
+    if (_convDebounce) clearTimeout(_convDebounce);
+    _convDebounce = setTimeout(() => loadConversation(slug, { force: true, confirmPending: true }), 600);
+  } else {
+    const e = convEntry(slug);
+    if (e.status === 'ok' || e.status === 'error') e.status = 'idle';
+  }
+}
+
+// reset a project's cached conversation (used by "↺ Nueva conv.")
+function convReset(slug) {
+  if (!slug) return;
+  CONV[slug] = { turns: [], truncated: false, status: 'ok', error: null, expanded: new Set(), pending: [] };
+  if (curSlug() === slug) renderConv();
+}
+
+function convStateEl(art, txt, retryFn) {
+  const wrap = document.createElement('div');
+  wrap.className = 'conv-state';
+  const pre = document.createElement('pre'); pre.className = 'art'; pre.textContent = art; wrap.appendChild(pre);
+  const t = document.createElement('div'); t.className = 'txt'; t.textContent = txt; wrap.appendChild(t);
+  if (retryFn) { const b = document.createElement('button'); b.className = 'retry'; b.textContent = 'Reintentar'; b.addEventListener('click', retryFn); wrap.appendChild(b); }
+  return wrap;
+}
+
+function convTurnEl(turn, idx, e) {
+  const d = document.createElement('div');
+  d.className = 'conv-turn ' + (turn.role === 'user' ? 'user' : 'arch') + (turn.pending ? ' pending' : '');
+  const head = document.createElement('div'); head.className = 'conv-head';
+  const who = document.createElement('span'); who.className = 'conv-who';
+  who.textContent = turn.role === 'user' ? 'USUARIA' : 'ARCHITECT';
+  head.appendChild(who);
+  if (turn.pending) { const p = document.createElement('span'); p.className = 'conv-pending'; p.textContent = 'enviando…'; head.appendChild(p); }
+  const tm = document.createElement('span'); tm.className = 'conv-time';
+  tm.textContent = turn.t ? relTime(turn.t) : '';
+  head.appendChild(tm);
+  d.appendChild(head);
+  const body = document.createElement('div'); body.className = 'conv-body';
+  const isLong = turn.text.length > CONV_COLLAPSE_LEN;
+  const open = turn.pending || e.expanded.has(idx);   // pending turns always show in full
+  body.textContent = (isLong && !open) ? (turn.text.slice(0, CONV_COLLAPSE_LEN) + '…') : turn.text;
+  d.appendChild(body);
+  if (isLong && !turn.pending) {
+    const btn = document.createElement('button'); btn.className = 'conv-more';
+    btn.textContent = open ? 'ver menos' : 'ver más';
+    btn.addEventListener('click', () => {
+      if (e.expanded.has(idx)) e.expanded.delete(idx); else e.expanded.add(idx);
+      renderConv({ keepScroll: true });
+    });
+    d.appendChild(btn);
+  }
+  return d;
+}
+
+function renderConv(opts) {
+  if (!conv) return;
+  const keepScroll = !!(opts && opts.keepScroll);
+  const prevTop = conv.scrollTop;
+  conv.innerHTML = '';
+  const slug = curSlug();
+  // GLOBAL (or demo) — no per-project thread to show
+  if (!slug) {
+    conv.appendChild(convStateEl(
+      '  ┌─┐ ┌─┐\n  └┬┘ └┬┘\n   └───┘',
+      ST.mode === 'demo'
+        // the project picker is hidden in demo, so "elige uno arriba" points nowhere.
+        ? 'La conversación es por proyecto — disponible en modo LIVE.'
+        : 'La conversación es por proyecto — elige uno en el picker de arriba para ver el hilo usuaria ↔ architect.'));
+    return;
+  }
+  const e = convEntry(slug);
+
+  // first-load with nothing yet → loading / error / empty placeholders
+  if (!e.turns.length && !e.pending.length) {
+    if (e.status === 'loading' || e.status === 'idle') {
+      conv.appendChild(convStateEl('  · · ·\n ( ⟳ )\n  · · ·', 'Cargando la conversación de este proyecto…'));
+      return;
+    }
+    if (e.status === 'error') {
+      conv.appendChild(convStateEl('  (×_×)\n  /||\\', 'No se pudo cargar la conversación: ' + e.error, () => loadConversation(slug, { force: true })));
+      return;
+    }
+    // status ok, genuinely empty
+    conv.appendChild(convStateEl(
+      '   (\\/)\n   (·· )   ·····\n   /||\\   hilo vacío',
+      'Sin conversación en este proyecto todavía — despacha abajo para empezar.'));
+    return;
+  }
+
+  // we have content: discreet status notes pinned on top, then the thread
+  if (e.status === 'loading') {
+    const n = document.createElement('div'); n.className = 'conv-note load'; n.textContent = 'actualizando…'; conv.appendChild(n);
+  } else if (e.status === 'error') {
+    const n = document.createElement('div'); n.className = 'conv-note err';
+    n.appendChild(document.createTextNode('no se pudo actualizar: ' + e.error));
+    const b = document.createElement('button'); b.className = 'retry'; b.textContent = 'Reintentar';
+    b.addEventListener('click', () => loadConversation(slug, { force: true }));
+    n.appendChild(b);
+    conv.appendChild(n);
+  }
+  if (e.truncated) {
+    const n = document.createElement('div'); n.className = 'conv-note trunc';
+    n.textContent = 'mostrando los últimos 100 turnos';
+    conv.appendChild(n);
+  }
+
+  e.turns.forEach((turn, i) => conv.appendChild(convTurnEl(turn, i, e)));
+  e.pending.forEach((turn, i) => conv.appendChild(convTurnEl(turn, 'p' + i, e)));
+
+  // scroll to the latest on (re)load; preserve position for in-place toggles
+  if (keepScroll) conv.scrollTop = prevTop;
+  else conv.scrollTop = conv.scrollHeight;
+}
 
 function recordMsg(a, b, text) {
   if (!a || !b) return;
@@ -781,6 +998,8 @@ function liveHandle(evt) {
         recordMsg(evt.a, evt.to, (evt.text || '').slice(0, 120));
       }
       feedLine('done' + (evt.critic ? ' critic' : ''), tag(evt.a) + '✅ ' + esc(evt.text || 'completado') + sharpHtml(evt.sharp), fmtClock(evt.t), { session: evt.session });
+      // the architect (hub) finishing a turn means the transcript moved → refresh the thread
+      if (evt.a === HUBCFG.id && evt.session) onArchitectTurnDone(evt.session);
       L.dirty = true;
       break;
     }
@@ -791,6 +1010,7 @@ function liveHandle(evt) {
       if (t) { t.end = evt.t || Date.now(); t.status = 'fail'; if (evt.text) t.title = evt.text; }
       if (vis) setStatus(evt.a, 'fail');
       feedLine('fail', tag(evt.a) + '✕ ' + esc(evt.text || 'falló'), fmtClock(evt.t), { session: evt.session });
+      if (evt.a === HUBCFG.id && evt.session) onArchitectTurnDone(evt.session);
       L.dirty = true;
       break;
     }
@@ -986,7 +1206,7 @@ if (compEl) {
     const v = compDir.value.trim();
     localStorage.setItem('stackops-projectdir', v);
     if (v) setProject(v);
-    else { ST.project = null; localStorage.setItem('stackops-activeproject', ''); renderPicker(); syncCompProject(); if (ST.mode === 'live') renderLiveView(); }
+    else { ST.project = null; localStorage.setItem('stackops-activeproject', ''); renderPicker(); syncCompProject(); if (ST.mode === 'live') renderLiveView(); renderConv(); }
     refreshThreadChip();
   });
   compDir.addEventListener('input', refreshThreadChip);
@@ -1004,6 +1224,7 @@ if (compEl) {
       // wipe this project's feed + tasks so the view starts clean
       ST.feedLog = ST.feedLog.filter(e => e.session !== slug);
       for (const [k, t] of ST.live.tasks) { if ((t.session || null) === slug) ST.live.tasks.delete(k); }
+      convReset(slug);   // clear this project's cached conversation too
       if (ST.mode === 'live') renderLiveView();
       feedLine('sys', '<span class="tag">[COMPOSER]</span> conversación de ' + slug + ' reseteada · vista limpia', undefined, { global: true });
       toast('Conversación reseteada · vista limpia', 'success');
@@ -1041,6 +1262,9 @@ if (compEl) {
       const sessionKey = activeSlug() || undefined;
       await sendToArchitect(message, sessionKey);
       if (dir && (!ST.project || ST.project.dir !== dir)) { saveRecentDir(dir); renderRecents(); setProject(dir); } // add + activate the project
+      // optimistic user turn on the project's thread (clean text, marked pending);
+      // the architect's done/fail event refetches the real transcript.
+      if (sessionKey && text) convAddOptimistic(sessionKey, text);
       refreshThreadChip();
       compText.value = '';
       pendingImgs.length = 0;
@@ -1106,7 +1330,13 @@ function setProject(dirOrGlobal) {
   renderPicker();
   syncCompProject();
   refreshThreadChip();
-  if (ST.mode === 'live') renderLiveView();
+  if (ST.mode === 'live') {
+    renderLiveView();
+    // switching INTO a project force-refetches its thread (per spec); GLOBAL just
+    // re-renders the "elige un proyecto" notice. Cache makes tab-alternating free.
+    const s = curSlug();
+    if (s) loadConversation(s, { force: true }); else renderConv();
+  }
 }
 
 function syncCompProject() {
@@ -1806,6 +2036,7 @@ function setMode(mode) {
   if (!live) ST.project = null; // demo has no per-project sessions
   renderPicker();
   syncCompProject();
+  renderConv();   // reflect the (possibly cleared) project in the conversation tab
 
   ST.agents = freshAgents();
   Object.keys(AG).forEach(id => setStatus(id, 'idle'));
@@ -2082,4 +2313,7 @@ if (isMobile()) setGraphCollapsed(true);
     $('footStatus').textContent = 'sin bridge · ' + location.host;
     hint.textContent = 'No hay bridge — corre "node server.js" para datos reales';
   }
+  // boot the conversation thread for the restored active project (if any)
+  const bootSlug = curSlug();
+  if (bootSlug) loadConversation(bootSlug); else renderConv();
 })();
